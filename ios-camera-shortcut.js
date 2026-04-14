@@ -1,74 +1,156 @@
 /**
- * iOS 26 Shortcut — Open Camera
+ * iOS 26 Shortcut — Front Camera Auto-Record
  *
  * How to use:
- *  1. In the Shortcuts app, add a "Get Current Page" action (to have a Safari
- *     page available) or navigate to any webpage in Safari first.
- *  2. Add a "Run JavaScript on Webpage" action.
- *  3. Paste the contents of this file into that action.
+ *  1. In Safari, open any page (even about:blank).
+ *  2. In Shortcuts, add a "Run JavaScript on Webpage" action targeting that tab.
+ *  3. Paste the contents of this file into the action.
  *
- * The script injects a full-screen camera overlay into the current Safari page.
- * Tapping "Close" stops the stream and removes the overlay.
+ * On run the script will:
+ *  - Open the front (selfie) camera.
+ *  - Immediately start recording with audio.
+ *  - Show a live preview and a "Stop & Save" button.
+ *  - When stopped, offer a download link for the recorded MP4.
  *
- * `completion()` is the Shortcuts-provided callback that ends the JavaScript
- * action and optionally passes a string value to the next Shortcut step.
+ * `completion()` is the Shortcuts-provided callback that signals the action
+ * is done and optionally passes a string to the next Shortcut step.
  */
 
-function openCamera() {
-  // 'environment' = rear camera. Change to 'user' for the front camera.
-  const constraints = {
-    video: { facingMode: 'environment' },
-    audio: false,
-  };
-
+function openCameraAndRecord() {
   if (!navigator.mediaDevices?.getUserMedia) {
     completion('Error: Camera API unavailable in this browser context.');
     return;
   }
 
+  // Pick the best supported MIME type — iOS Safari supports mp4, not webm
+  const MIME_TYPES = ['video/mp4', 'video/mp4;codecs=avc1', 'video/quicktime', ''];
+  const mimeType = MIME_TYPES.find((t) => t === '' || MediaRecorder.isTypeSupported(t)) ?? '';
+
   navigator.mediaDevices
-    .getUserMedia(constraints)
+    .getUserMedia({
+      video: { facingMode: 'user' }, // front (selfie) camera
+      audio: true,
+    })
     .then((stream) => {
+      const chunks = [];
+
+      /* ── MediaRecorder — starts immediately ── */
+      const recorderOptions = mimeType ? { mimeType } : {};
+      const recorder = new MediaRecorder(stream, recorderOptions);
+      recorder.addEventListener('dataavailable', (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      });
+      recorder.start(100); // collect a chunk every 100 ms
+
       /* ── Overlay container ── */
       const overlay = document.createElement('div');
       overlay.style.cssText =
         'position:fixed;inset:0;background:#000;z-index:2147483647;' +
         'display:flex;flex-direction:column;align-items:center;justify-content:center;';
 
-      /* ── Video element ── */
+      /* ── Live preview ── */
       const video = document.createElement('video');
       video.style.cssText = 'width:100%;height:100%;object-fit:cover;';
-      // Both attributes are required for inline autoplay on iOS Safari
-      video.setAttribute('playsinline', '');
+      video.setAttribute('playsinline', ''); // required for inline playback on iOS
       video.setAttribute('autoplay', '');
-      video.muted = true;
+      video.muted = true; // mute preview to avoid echo; audio is still recorded
       video.srcObject = stream;
 
-      /* ── Close button ── */
-      const closeBtn = document.createElement('button');
-      closeBtn.textContent = 'Close';
-      closeBtn.style.cssText =
-        'position:absolute;top:env(safe-area-inset-top,20px);right:16px;' +
-        'margin-top:12px;padding:10px 22px;' +
-        'background:rgba(255,255,255,0.85);backdrop-filter:blur(8px);' +
-        'border:none;border-radius:20px;font-size:16px;font-weight:600;' +
-        'cursor:pointer;z-index:2147483647;';
+      /* ── Recording indicator ── */
+      const indicator = document.createElement('div');
+      indicator.style.cssText =
+        'position:absolute;top:env(safe-area-inset-top,20px);left:16px;margin-top:12px;' +
+        'display:flex;align-items:center;gap:8px;' +
+        'background:rgba(0,0,0,0.5);backdrop-filter:blur(6px);' +
+        'padding:6px 14px;border-radius:20px;';
+      const dot = document.createElement('span');
+      dot.style.cssText =
+        'width:10px;height:10px;border-radius:50%;background:#ff3b30;' +
+        'animation:blink 1s step-start infinite;';
+      const recLabel = document.createElement('span');
+      recLabel.textContent = 'REC';
+      recLabel.style.cssText = 'color:#fff;font-size:13px;font-weight:700;letter-spacing:1px;';
+      indicator.appendChild(dot);
+      indicator.appendChild(recLabel);
 
-      closeBtn.addEventListener('click', () => {
-        stream.getTracks().forEach((track) => track.stop());
-        overlay.remove();
-        completion('Camera closed by user.');
+      // Inject blink keyframes once
+      if (!document.getElementById('_rec_style')) {
+        const style = document.createElement('style');
+        style.id = '_rec_style';
+        style.textContent = '@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}';
+        document.head.appendChild(style);
+      }
+
+      /* ── Stop & Save button ── */
+      const stopBtn = document.createElement('button');
+      stopBtn.textContent = 'Stop & Save';
+      stopBtn.style.cssText =
+        'position:absolute;top:env(safe-area-inset-top,20px);right:16px;margin-top:12px;' +
+        'padding:10px 22px;background:rgba(255,255,255,0.85);backdrop-filter:blur(8px);' +
+        'border:none;border-radius:20px;font-size:16px;font-weight:600;cursor:pointer;';
+
+      stopBtn.addEventListener('click', () => {
+        recorder.addEventListener('stop', () => {
+          // Stop camera tracks
+          stream.getTracks().forEach((t) => t.stop());
+
+          // Build a blob from recorded chunks
+          const blob = new Blob(chunks, { type: mimeType || 'video/mp4' });
+          const url = URL.createObjectURL(blob);
+
+          // Replace the live preview with a playback + download UI
+          overlay.innerHTML = '';
+          overlay.style.background = '#111';
+
+          const playback = document.createElement('video');
+          playback.src = url;
+          playback.controls = true;
+          playback.setAttribute('playsinline', '');
+          playback.style.cssText = 'max-width:100%;max-height:75vh;margin-top:40px;';
+
+          const sizeMB = (blob.size / 1_048_576).toFixed(2);
+          const info = document.createElement('p');
+          info.textContent = `Recording ready — ${sizeMB} MB`;
+          info.style.cssText = 'color:#fff;font-size:15px;margin:12px 0;';
+
+          const downloadBtn = document.createElement('a');
+          downloadBtn.href = url;
+          downloadBtn.download = `recording-${Date.now()}.mp4`;
+          downloadBtn.textContent = 'Download / Share';
+          downloadBtn.style.cssText =
+            'display:inline-block;padding:12px 28px;background:#0a84ff;color:#fff;' +
+            'text-decoration:none;border-radius:20px;font-size:16px;font-weight:600;margin:8px;';
+
+          const dismissBtn = document.createElement('button');
+          dismissBtn.textContent = 'Dismiss';
+          dismissBtn.style.cssText =
+            'padding:12px 28px;background:rgba(255,255,255,0.15);color:#fff;' +
+            'border:none;border-radius:20px;font-size:16px;cursor:pointer;margin:8px;';
+          dismissBtn.addEventListener('click', () => {
+            URL.revokeObjectURL(url);
+            overlay.remove();
+            completion('Recording saved: ' + sizeMB + ' MB');
+          });
+
+          overlay.appendChild(playback);
+          overlay.appendChild(info);
+          overlay.appendChild(downloadBtn);
+          overlay.appendChild(dismissBtn);
+        });
+
+        recorder.stop();
       });
 
       /* ── Assemble and inject ── */
       overlay.appendChild(video);
-      overlay.appendChild(closeBtn);
+      overlay.appendChild(indicator);
+      overlay.appendChild(stopBtn);
       document.body.appendChild(overlay);
 
-      video.play().catch((err) => {
-        // Autoplay was blocked — show a tap-to-start prompt
+      video.play().catch(() => {
+        // Autoplay blocked — prompt a tap to begin
         const playBtn = document.createElement('button');
-        playBtn.textContent = 'Tap to Start Camera';
+        playBtn.textContent = 'Tap to Start';
         playBtn.style.cssText =
           'position:absolute;padding:14px 28px;background:rgba(255,255,255,0.9);' +
           'border:none;border-radius:14px;font-size:18px;font-weight:700;cursor:pointer;';
@@ -80,9 +162,8 @@ function openCamera() {
       });
     })
     .catch((err) => {
-      // Common causes: user denied permission, or no camera hardware
-      completion('Error opening camera: ' + err.message);
+      completion('Error accessing camera/microphone: ' + err.message);
     });
 }
 
-openCamera();
+openCameraAndRecord();
