@@ -339,14 +339,13 @@
   /* ────────────────────────────────────────────
      State
   ──────────────────────────────────────────── */
-  const CORRECT_PIN   = '1234';   // change to whatever you like
-  const MAX_WRONG     = 2;
+  const CORRECT_PIN       = '1234';          // change to whatever you like
+  const MAX_WRONG         = 2;
+  const SHORTCUT_NAME     = 'Strobe Alarm';  // must match your Shortcut name exactly
 
-  let entered      = '';
-  let wrongCount   = 0;
-  let locked       = false;
-  let torchStream  = null;
-  let torchTrack   = null;
+  let entered    = '';
+  let wrongCount = 0;
+  let locked     = false;
 
   /* ────────────────────────────────────────────
      DOM refs
@@ -418,52 +417,30 @@
   }
 
   /* ────────────────────────────────────────────
-     Flashlight via camera torch
+     iOS Shortcut launcher
+     Opens "shortcuts://run-shortcut?name=…" via
+     a simulated link click — stays within the
+     user-gesture stack so iOS allows the app switch.
+     Safari backgrounds the page; JS resumes on return.
   ──────────────────────────────────────────── */
-  async function acquireTorch() {
-    try {
-      torchStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { exact: 'environment' } }
-      });
-      torchTrack = torchStream.getVideoTracks()[0];
-    } catch (e) {
-      // Torch unavailable (desktop / permission denied) — silent fallback
-      torchTrack = null;
-    }
-  }
-
-  async function setTorch(on) {
-    if (!torchTrack) return;
-    try {
-      await torchTrack.applyConstraints({ advanced: [{ torch: on }] });
-    } catch (_) { /* not supported */ }
-  }
-
-  function releaseTorch() {
-    if (torchStream) {
-      torchStream.getTracks().forEach(t => t.stop());
-      torchStream = null;
-      torchTrack  = null;
-    }
+  function launchShortcut(name) {
+    const a = document.createElement('a');
+    a.href  = `shortcuts://run-shortcut?name=${encodeURIComponent(name)}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   }
 
   /* ────────────────────────────────────────────
-     Alarm — red/blue strobe + torch
+     Visual red/blue strobe (runs on the page
+     while the Shortcut strobes the real torch)
   ──────────────────────────────────────────── */
-  async function triggerAlarm() {
-    locked = true;
-    busted.classList.add('show');
-    attemptMsg.classList.remove('visible');
+  function runVisualStrobe() {
+    const DURATION   = 6000;  // ms
+    const FLASH_HALF = 120;   // ms per colour half-cycle
 
-    await acquireTorch();
-
-    const DURATION    = 6000;  // ms total strobe
-    const FLASH_HALF  = 120;   // ms per half-cycle (red → blue)
-
-    let phase      = 0;   // 0 = red, 1 = blue
-    let torchOn    = false;
-    let elapsed    = 0;
-    let lastTime   = performance.now();
+    let elapsed  = 0;
+    let lastTime = performance.now();
 
     function frame(now) {
       const dt = now - lastTime;
@@ -471,38 +448,39 @@
       elapsed  += dt;
 
       if (elapsed >= DURATION) {
-        // Stop
         strobe.style.opacity = '0';
-        releaseTorch();
-        setTorch(false);
         busted.classList.remove('show');
-        locked = false;
+        locked     = false;
         wrongCount = 0;
         attemptMsg.textContent = '';
         return;
       }
 
-      // Toggle strobe color
       const cyclePos = elapsed % (FLASH_HALF * 2);
-      if (cyclePos < FLASH_HALF) {
-        strobe.style.background = 'rgba(255, 30, 30, 0.55)';
-        strobe.style.opacity    = '1';
-      } else {
-        strobe.style.background = 'rgba(20, 80, 255, 0.55)';
-        strobe.style.opacity    = '1';
-      }
-
-      // Toggle torch every half-cycle
-      const newTorchOn = cyclePos < FLASH_HALF;
-      if (newTorchOn !== torchOn) {
-        torchOn = newTorchOn;
-        setTorch(torchOn);
-      }
+      strobe.style.background = cyclePos < FLASH_HALF
+        ? 'rgba(255, 30, 30, 0.60)'
+        : 'rgba(20,  80, 255, 0.60)';
+      strobe.style.opacity = '1';
 
       requestAnimationFrame(frame);
     }
 
     requestAnimationFrame(frame);
+  }
+
+  /* ────────────────────────────────────────────
+     Alarm — fire Shortcut + run visual strobe
+  ──────────────────────────────────────────── */
+  function triggerAlarm() {
+    locked = true;
+    busted.classList.add('show');
+    attemptMsg.classList.remove('visible');
+
+    // Hand torch control to the iOS Shortcut (native flashlight)
+    launchShortcut(SHORTCUT_NAME);
+
+    // Screen strobe continues while Shortcuts runs in the background
+    runVisualStrobe();
   }
 
   /* ────────────────────────────────────────────
