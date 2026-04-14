@@ -12,7 +12,7 @@
  *  - EyeTrackingTest — composes the two; the only class you need to instantiate
  *
  * Quick-start (bottom of file):
- *  new EyeTrackingTest({ duration: 30_000, pattern: 'lissajous' }).start();
+ *  new EyeTrackingTest({ duration: 30000, pattern: 'lissajous' }).start();
  */
 
 // ── CameraRecorder ────────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ class CameraRecorder {
  * Full-screen canvas that animates a moving dot.
  *
  * Usage:
- *   const anim = new DotAnimator({ pattern: 'lissajous', duration: 30_000 });
+ *   const anim = new DotAnimator({ pattern: 'lissajous', duration: 30000 });
  *   anim.mount();
  *   anim.start(() => console.log('done'));
  *   // or: await anim.run();
@@ -123,7 +123,7 @@ class DotAnimator {
    */
   constructor({
     pattern = 'lissajous',
-    duration = 30_000,
+    duration = 30000,
     dotRadius = 18,
     dotColor = '#ff3b30',
     bgColor = '#000000',
@@ -252,7 +252,7 @@ class DotAnimator {
  * Composes CameraRecorder + DotAnimator into a single reusable test.
  *
  * Usage:
- *   const test = new EyeTrackingTest({ duration: 30_000, pattern: 'lissajous' });
+ *   const test = new EyeTrackingTest({ duration: 30000, pattern: 'lissajous' });
  *   test.start();
  *
  * All DotAnimator and CameraRecorder options can be passed directly.
@@ -274,7 +274,7 @@ class EyeTrackingTest {
    */
   constructor(opts = {}) {
     this.opts = {
-      duration: 30_000,
+      duration: 30000,
       pattern: 'lissajous',
       dotRadius: 18,
       dotColor: '#ff3b30',
@@ -309,7 +309,7 @@ class EyeTrackingTest {
         return cam.stopRecording();
       })
       .then((blob) => {
-        const sizeMB = (blob.size / 1_048_576).toFixed(2);
+        const sizeMB = (blob.size / 1048576).toFixed(2);
         CameraRecorder.saveBlob(blob, filename);
         setTimeout(() => anim.unmount(), 3000);
         onComplete?.(blob, sizeMB);
@@ -328,7 +328,7 @@ class EyeTrackingTest {
 completion('Eye tracking test started');
 
 new EyeTrackingTest({
-  duration:     30_000,       // ms
+  duration:     30000,        // ms
   pattern:      'lissajous',  // 'lissajous' | 'horizontal' | 'circular'
   dotRadius:    18,
   dotColor:     '#ff3b30',
