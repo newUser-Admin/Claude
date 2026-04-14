@@ -1,165 +1,338 @@
 /**
- * iOS 26 Shortcut — Eye Tracking Test (Smooth Pursuit)
+ * iOS 26 Shortcut — Modular Eye Tracking Test
  *
  * How to use:
  *  1. In Safari, open any page (even about:blank).
  *  2. In Shortcuts, add a "Run JavaScript on Webpage" action targeting that tab.
  *  3. Paste the contents of this file into the action.
  *
- * The script:
- *  - Records the user via the front camera (hidden — full screen is used for the test).
- *  - Displays a moving dot the user follows with their eyes.
- *  - Runs a configurable sequence of movement patterns.
- *  - Auto-saves the recording when the test completes.
+ * Architecture:
+ *  - CameraRecorder  — manages the camera stream and MediaRecorder
+ *  - DotAnimator     — manages the full-screen canvas and dot movement
+ *  - EyeTrackingTest — composes the two; the only class you need to instantiate
  *
- * `completion()` is called immediately so the Shortcuts action doesn't time out.
+ * Quick-start (bottom of file):
+ *  new EyeTrackingTest({ duration: 30_000, pattern: 'lissajous' }).start();
  */
 
-// ── Configuration ────────────────────────────────────────────────────────────
-const CONFIG = {
-  dotRadius: 18,          // px
-  dotColor: '#ff3b30',    // red dot
-  bgColor: '#000000',     // test background
-  durationMs: 30_000,     // total test duration (ms)
-  pattern: 'lissajous',   // 'lissajous' | 'horizontal' | 'circular'
-};
-// ─────────────────────────────────────────────────────────────────────────────
-
-function runEyeTrackingTest() {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    completion('Error: Camera API unavailable.');
-    return;
+// ── CameraRecorder ────────────────────────────────────────────────────────────
+/**
+ * Wraps getUserMedia + MediaRecorder.
+ *
+ * Usage:
+ *   const cam = new CameraRecorder({ facingMode: 'user', audio: false });
+ *   await cam.open();
+ *   cam.startRecording();
+ *   const blob = await cam.stopRecording();
+ */
+class CameraRecorder {
+  /**
+   * @param {object} opts
+   * @param {'user'|'environment'} [opts.facingMode='user']
+   * @param {boolean}              [opts.audio=false]
+   */
+  constructor({ facingMode = 'user', audio = false } = {}) {
+    this.constraints = { video: { facingMode }, audio };
+    this.stream = null;
+    this.recorder = null;
+    this._chunks = [];
+    this._mimeType = this._pickMime();
   }
 
-  const MIME_TYPES = ['video/mp4', 'video/mp4;codecs=avc1', 'video/quicktime', ''];
-  const mimeType = MIME_TYPES.find((t) => t === '' || MediaRecorder.isTypeSupported(t)) ?? '';
+  _pickMime() {
+    const candidates = ['video/mp4', 'video/mp4;codecs=avc1', 'video/quicktime', ''];
+    return candidates.find((t) => t === '' || MediaRecorder.isTypeSupported(t)) ?? '';
+  }
 
-  navigator.mediaDevices
-    .getUserMedia({ video: { facingMode: 'user' }, audio: false })
-    .then((stream) => {
-      const chunks = [];
-      const recorderOptions = mimeType ? { mimeType } : {};
-      const recorder = new MediaRecorder(stream, recorderOptions);
-      recorder.addEventListener('dataavailable', (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
-      });
-      recorder.start(100);
+  /** Acquires the camera stream. Must be called before startRecording(). */
+  async open() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Camera API unavailable in this browser context.');
+    }
+    this.stream = await navigator.mediaDevices.getUserMedia(this.constraints);
+    return this;
+  }
 
-      /* ── Full-screen canvas overlay ── */
-      const canvas = document.createElement('canvas');
-      canvas.style.cssText =
-        'position:fixed;inset:0;z-index:2147483647;touch-action:none;';
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-      document.body.appendChild(canvas);
-      const ctx = canvas.getContext('2d');
-
-      // Resize canvas if orientation changes
-      window.addEventListener('resize', () => {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-      });
-
-      /* ── Dot animation ── */
-      const startTime = performance.now();
-      let animFrameId;
-
-      function getDotPosition(t) {
-        const w = canvas.width;
-        const h = canvas.height;
-        const margin = CONFIG.dotRadius * 4;
-        const cx = w / 2, cy = h / 2;
-        const rx = w / 2 - margin, ry = h / 2 - margin;
-
-        switch (CONFIG.pattern) {
-          case 'horizontal':
-            return {
-              x: cx + rx * Math.sin(t * 0.8),
-              y: cy + ry * 0.15 * Math.sin(t * 0.4),
-            };
-          case 'circular':
-            return {
-              x: cx + rx * Math.cos(t * 0.6),
-              y: cy + ry * Math.sin(t * 0.6),
-            };
-          case 'lissajous':
-          default:
-            return {
-              x: cx + rx * Math.sin(t * 0.7),
-              y: cy + ry * Math.sin(t * 0.5 + Math.PI / 4),
-            };
-        }
-      }
-
-      function drawFrame(now) {
-        const elapsed = now - startTime;
-        const t = elapsed / 1000; // seconds
-        const progress = Math.min(elapsed / CONFIG.durationMs, 1);
-
-        // Background
-        ctx.fillStyle = CONFIG.bgColor;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Progress bar (subtle, bottom of screen)
-        ctx.fillStyle = 'rgba(255,255,255,0.15)';
-        ctx.fillRect(0, canvas.height - 3, canvas.width * progress, 3);
-
-        // Dot
-        const { x, y } = getDotPosition(t);
-        ctx.beginPath();
-        ctx.arc(x, y, CONFIG.dotRadius, 0, Math.PI * 2);
-        ctx.fillStyle = CONFIG.dotColor;
-        ctx.fill();
-
-        if (progress < 1) {
-          animFrameId = requestAnimationFrame(drawFrame);
-        } else {
-          finishTest();
-        }
-      }
-
-      animFrameId = requestAnimationFrame(drawFrame);
-
-      /* ── Finish: stop recording and auto-save ── */
-      function finishTest() {
-        recorder.addEventListener('stop', () => {
-          stream.getTracks().forEach((t) => t.stop());
-
-          const blob = new Blob(chunks, { type: mimeType || 'video/mp4' });
-          const url = URL.createObjectURL(blob);
-          const sizeMB = (blob.size / 1_048_576).toFixed(2);
-
-          // Show brief "Saved" message on canvas before dismissing
-          ctx.fillStyle = CONFIG.bgColor;
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.fillStyle = '#fff';
-          ctx.font = 'bold 22px -apple-system, sans-serif';
-          ctx.textAlign = 'center';
-          ctx.fillText('Test complete — saving recording…', canvas.width / 2, canvas.height / 2);
-
-          // Auto-trigger download / share sheet
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `eye-tracking-${Date.now()}.mp4`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-
-          setTimeout(() => {
-            URL.revokeObjectURL(url);
-            canvas.remove();
-          }, 3000);
-        });
-
-        recorder.stop();
-      }
-
-      // Signal Shortcuts immediately so the action doesn't time out
-      completion('Eye tracking test started');
-    })
-    .catch((err) => {
-      completion('Error: ' + err.message);
+  /** Begins recording. Call open() first. */
+  startRecording() {
+    if (!this.stream) throw new Error('Call open() before startRecording().');
+    this._chunks = [];
+    const opts = this._mimeType ? { mimeType: this._mimeType } : {};
+    this.recorder = new MediaRecorder(this.stream, opts);
+    this.recorder.addEventListener('dataavailable', (e) => {
+      if (e.data.size > 0) this._chunks.push(e.data);
     });
+    this.recorder.start(100); // chunk every 100 ms
+  }
+
+  /**
+   * Stops recording and returns a Blob.
+   * @returns {Promise<Blob>}
+   */
+  stopRecording() {
+    return new Promise((resolve) => {
+      if (!this.recorder || this.recorder.state === 'inactive') {
+        resolve(new Blob(this._chunks, { type: this._mimeType || 'video/mp4' }));
+        return;
+      }
+      this.recorder.addEventListener('stop', () => {
+        this.stream.getTracks().forEach((t) => t.stop());
+        resolve(new Blob(this._chunks, { type: this._mimeType || 'video/mp4' }));
+      });
+      this.recorder.stop();
+    });
+  }
+
+  /**
+   * Triggers the iOS share/save sheet for a recorded Blob.
+   * @param {Blob}   blob
+   * @param {string} [filename]
+   */
+  static saveBlob(blob, filename = `recording-${Date.now()}.mp4`) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
 }
 
-runEyeTrackingTest();
+
+// ── DotAnimator ───────────────────────────────────────────────────────────────
+/**
+ * Full-screen canvas that animates a moving dot.
+ *
+ * Usage:
+ *   const anim = new DotAnimator({ pattern: 'lissajous', duration: 30_000 });
+ *   anim.mount();
+ *   anim.start(() => console.log('done'));
+ *   // or: await anim.run();
+ */
+class DotAnimator {
+  /**
+   * @param {object}  opts
+   * @param {string}  [opts.pattern='lissajous'] — 'lissajous' | 'horizontal' | 'circular'
+   * @param {number}  [opts.duration=30000]       — ms
+   * @param {number}  [opts.dotRadius=18]         — px
+   * @param {string}  [opts.dotColor='#ff3b30']
+   * @param {string}  [opts.bgColor='#000000']
+   * @param {boolean} [opts.showProgress=true]    — thin progress bar at bottom
+   */
+  constructor({
+    pattern = 'lissajous',
+    duration = 30_000,
+    dotRadius = 18,
+    dotColor = '#ff3b30',
+    bgColor = '#000000',
+    showProgress = true,
+  } = {}) {
+    this.pattern = pattern;
+    this.duration = duration;
+    this.dotRadius = dotRadius;
+    this.dotColor = dotColor;
+    this.bgColor = bgColor;
+    this.showProgress = showProgress;
+    this.canvas = null;
+    this.ctx = null;
+    this._animFrameId = null;
+    this._resizeHandler = null;
+  }
+
+  /** Creates and appends the canvas to the document. */
+  mount() {
+    this.canvas = document.createElement('canvas');
+    this.canvas.style.cssText =
+      'position:fixed;inset:0;z-index:2147483647;touch-action:none;';
+    this._resize();
+    document.body.appendChild(this.canvas);
+    this.ctx = this.canvas.getContext('2d');
+    this._resizeHandler = () => this._resize();
+    window.addEventListener('resize', this._resizeHandler);
+    return this;
+  }
+
+  /** Removes the canvas from the document. */
+  unmount() {
+    if (this._resizeHandler) window.removeEventListener('resize', this._resizeHandler);
+    this.canvas?.remove();
+    this.canvas = null;
+    this.ctx = null;
+  }
+
+  _resize() {
+    if (!this.canvas) return;
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
+  }
+
+  _dotPosition(t) {
+    const { canvas, dotRadius, pattern } = this;
+    const margin = dotRadius * 4;
+    const cx = canvas.width / 2,  cy = canvas.height / 2;
+    const rx = canvas.width / 2  - margin;
+    const ry = canvas.height / 2 - margin;
+
+    switch (pattern) {
+      case 'horizontal':
+        return { x: cx + rx * Math.sin(t * 0.8), y: cy + ry * 0.15 * Math.sin(t * 0.4) };
+      case 'circular':
+        return { x: cx + rx * Math.cos(t * 0.6), y: cy + ry * Math.sin(t * 0.6) };
+      case 'lissajous':
+      default:
+        return { x: cx + rx * Math.sin(t * 0.7), y: cy + ry * Math.sin(t * 0.5 + Math.PI / 4) };
+    }
+  }
+
+  _drawFrame(now, startTime, onComplete) {
+    const elapsed  = now - startTime;
+    const t        = elapsed / 1000;
+    const progress = Math.min(elapsed / this.duration, 1);
+    const { ctx, canvas } = this;
+
+    ctx.fillStyle = this.bgColor;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (this.showProgress) {
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fillRect(0, canvas.height - 3, canvas.width * progress, 3);
+    }
+
+    const { x, y } = this._dotPosition(t);
+    ctx.beginPath();
+    ctx.arc(x, y, this.dotRadius, 0, Math.PI * 2);
+    ctx.fillStyle = this.dotColor;
+    ctx.fill();
+
+    if (progress < 1) {
+      this._animFrameId = requestAnimationFrame((ts) => this._drawFrame(ts, startTime, onComplete));
+    } else {
+      onComplete?.();
+    }
+  }
+
+  /**
+   * Starts the animation loop.
+   * @param {Function} [onComplete] — called when duration elapses
+   */
+  start(onComplete) {
+    if (!this.canvas) this.mount();
+    const startTime = performance.now();
+    this._animFrameId = requestAnimationFrame((ts) => this._drawFrame(ts, startTime, onComplete));
+  }
+
+  /** Promise-based alternative to start(). Resolves when the test finishes. */
+  run() {
+    return new Promise((resolve) => this.start(resolve));
+  }
+
+  /** Shows a brief message on the canvas (e.g. after test completes). */
+  showMessage(text) {
+    const { ctx, canvas } = this;
+    ctx.fillStyle = this.bgColor;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 22px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  }
+
+  /** Cancels an in-progress animation. */
+  stop() {
+    if (this._animFrameId) cancelAnimationFrame(this._animFrameId);
+  }
+}
+
+
+// ── EyeTrackingTest ───────────────────────────────────────────────────────────
+/**
+ * Composes CameraRecorder + DotAnimator into a single reusable test.
+ *
+ * Usage:
+ *   const test = new EyeTrackingTest({ duration: 30_000, pattern: 'lissajous' });
+ *   test.start();
+ *
+ * All DotAnimator and CameraRecorder options can be passed directly.
+ */
+class EyeTrackingTest {
+  /**
+   * @param {object}  opts
+   * @param {number}  [opts.duration=30000]
+   * @param {string}  [opts.pattern='lissajous']
+   * @param {number}  [opts.dotRadius=18]
+   * @param {string}  [opts.dotColor='#ff3b30']
+   * @param {string}  [opts.bgColor='#000000']
+   * @param {boolean} [opts.showProgress=true]
+   * @param {'user'|'environment'} [opts.facingMode='user']
+   * @param {boolean}  [opts.audio=false]
+   * @param {string}   [opts.filename]         — override output filename
+   * @param {Function} [opts.onComplete]       — called with the saved Blob
+   * @param {Function} [opts.onError]          — called with an Error
+   */
+  constructor(opts = {}) {
+    this.opts = {
+      duration: 30_000,
+      pattern: 'lissajous',
+      dotRadius: 18,
+      dotColor: '#ff3b30',
+      bgColor: '#000000',
+      showProgress: true,
+      facingMode: 'user',
+      audio: false,
+      filename: `eye-tracking-${Date.now()}.mp4`,
+      onComplete: null,
+      onError: null,
+      ...opts,
+    };
+  }
+
+  async start() {
+    const { duration, pattern, dotRadius, dotColor, bgColor, showProgress,
+            facingMode, audio, filename, onComplete, onError } = this.opts;
+
+    const cam  = new CameraRecorder({ facingMode, audio });
+    const anim = new DotAnimator({ pattern, duration, dotRadius, dotColor, bgColor, showProgress });
+
+    try {
+      await cam.open();
+    } catch (err) {
+      onError ? onError(err) : completion('Error: ' + err.message);
+      return;
+    }
+
+    // Signal Shortcuts immediately so the action doesn't time out
+    completion('Eye tracking test started');
+
+    cam.startRecording();
+    anim.mount();
+
+    await anim.run(); // resolves when duration elapses
+
+    anim.showMessage('Test complete — saving…');
+
+    const blob = await cam.stopRecording();
+    const sizeMB = (blob.size / 1_048_576).toFixed(2);
+
+    CameraRecorder.saveBlob(blob, filename);
+
+    setTimeout(() => anim.unmount(), 3000);
+
+    onComplete?.(blob, sizeMB);
+  }
+}
+
+
+// ── Run ───────────────────────────────────────────────────────────────────────
+new EyeTrackingTest({
+  duration:     30_000,       // ms
+  pattern:      'lissajous',  // 'lissajous' | 'horizontal' | 'circular'
+  dotRadius:    18,
+  dotColor:     '#ff3b30',
+  bgColor:      '#000000',
+  showProgress: true,
+  facingMode:   'user',       // 'user' = front, 'environment' = rear
+  audio:        false,
+}).start();
