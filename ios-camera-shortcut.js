@@ -103,7 +103,6 @@ function openCameraAndRecord() {
           setTimeout(() => {
             URL.revokeObjectURL(url);
             overlay.remove();
-            completion('Recording auto-saved: ' + sizeMB + ' MB');
           }, 3000);
         });
 
@@ -114,6 +113,10 @@ function openCameraAndRecord() {
       overlay.appendChild(video);
       overlay.appendChild(stopBtn);
       document.body.appendChild(overlay);
+
+      // Signal Shortcuts immediately — the overlay and recorder keep running
+      // independently after this. Waiting for user interaction caused a timeout.
+      completion('Recording started');
 
       video.play().catch(() => {
         // Autoplay blocked — prompt a tap to begin
@@ -130,7 +133,8 @@ function openCameraAndRecord() {
       });
     })
     .catch((err) => {
-      completion('Error accessing camera/microphone: ' + err.message);
+      // completion() hasn't been called yet if we reach here, so it's safe
+      completion('Error: ' + err.message);
     });
 }
 
