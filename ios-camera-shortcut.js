@@ -88,29 +88,23 @@ function openCameraAndRecord() {
           info.textContent = `Recording ready — ${sizeMB} MB`;
           info.style.cssText = 'color:#fff;font-size:15px;margin:12px 0;';
 
-          const downloadBtn = document.createElement('a');
-          downloadBtn.href = url;
-          downloadBtn.download = `recording-${Date.now()}.mp4`;
-          downloadBtn.textContent = 'Download / Share';
-          downloadBtn.style.cssText =
-            'display:inline-block;padding:12px 28px;background:#0a84ff;color:#fff;' +
-            'text-decoration:none;border-radius:20px;font-size:16px;font-weight:600;margin:8px;';
+          // Auto-trigger download
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `recording-${Date.now()}.mp4`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
 
-          const dismissBtn = document.createElement('button');
-          dismissBtn.textContent = 'Dismiss';
-          dismissBtn.style.cssText =
-            'padding:12px 28px;background:rgba(255,255,255,0.15);color:#fff;' +
-            'border:none;border-radius:20px;font-size:16px;cursor:pointer;margin:8px;';
-          dismissBtn.addEventListener('click', () => {
-            URL.revokeObjectURL(url);
-            overlay.remove();
-            completion('Recording saved: ' + sizeMB + ' MB');
-          });
-
+          // Show a brief confirmation, then clean up
           overlay.appendChild(playback);
           overlay.appendChild(info);
-          overlay.appendChild(downloadBtn);
-          overlay.appendChild(dismissBtn);
+
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+            overlay.remove();
+            completion('Recording auto-saved: ' + sizeMB + ' MB');
+          }, 3000);
         });
 
         recorder.stop();
