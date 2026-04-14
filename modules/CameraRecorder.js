@@ -47,8 +47,6 @@ function CameraRecorder(opts) {
   /** Begins recording. Call open() first. */
   self.startRecording = function() {
     if (!self.stream) throw new Error('Call open() before startRecording().');
-    // completion() reflects this module executing when used standalone.
-    completion('CameraRecorder: recording started (' + self.constraints.video.facingMode + ' camera)');
     self._chunks = [];
     var recOpts = self._mimeType ? { mimeType: self._mimeType } : {};
     self.recorder = new MediaRecorder(self.stream, recOpts);

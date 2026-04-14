@@ -47,8 +47,6 @@ function CameraRecorder(opts) {
   /** Begins recording. Call open() first. */
   self.startRecording = function() {
     if (!self.stream) throw new Error('Call open() before startRecording().');
-    // completion() reflects this module executing when used standalone.
-    completion('CameraRecorder: recording started (' + self.constraints.video.facingMode + ' camera)');
     self._chunks = [];
     var recOpts = self._mimeType ? { mimeType: self._mimeType } : {};
     self.recorder = new MediaRecorder(self.stream, recOpts);
@@ -269,10 +267,6 @@ function EyeTrackingTest(opts) {
   self.start = function() {
     var o = self.opts;
 
-    // completion() is the first synchronous statement so Shortcuts receives
-    // a result that reflects this specific module executing.
-    completion('EyeTrackingTest: running (' + o.pattern + ', ' + o.duration + 'ms)');
-
     var cam  = new CameraRecorder({ facingMode: o.facingMode, audio: o.audio });
     var anim = new DotAnimator({
       pattern:      o.pattern,
@@ -310,8 +304,9 @@ function EyeTrackingTest(opts) {
  * Entry point — paste the built ios-camera-shortcut.js into the
  * iOS Shortcuts "Run JavaScript on Webpage" action.
  *
- * completion() is called by each module as its first synchronous
- * statement, reflecting which module is actually executing.
+ * completion() must be called at the true top level of the script —
+ * not inside any function, method, or Promise chain. The message is
+ * built from config so it reflects what is actually executing.
  */
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -326,5 +321,8 @@ var config = {
   audio:        false,
 };
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Top-level completion() — reflects the module and config executing.
+completion('EyeTrackingTest: ' + config.pattern + ' ' + config.duration + 'ms ' + config.facingMode + ' camera');
 
 new EyeTrackingTest(config).start();

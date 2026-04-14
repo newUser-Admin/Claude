@@ -2,8 +2,9 @@
  * Entry point — paste the built ios-camera-shortcut.js into the
  * iOS Shortcuts "Run JavaScript on Webpage" action.
  *
- * completion() is called by each module as its first synchronous
- * statement, reflecting which module is actually executing.
+ * completion() must be called at the true top level of the script —
+ * not inside any function, method, or Promise chain. The message is
+ * built from config so it reflects what is actually executing.
  */
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -18,5 +19,8 @@ var config = {
   audio:        false,
 };
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Top-level completion() — reflects the module and config executing.
+completion('EyeTrackingTest: ' + config.pattern + ' ' + config.duration + 'ms ' + config.facingMode + ' camera');
 
 new EyeTrackingTest(config).start();
