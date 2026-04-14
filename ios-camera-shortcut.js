@@ -56,31 +56,6 @@ function openCameraAndRecord() {
       video.muted = true; // mute preview to avoid echo; audio is still recorded
       video.srcObject = stream;
 
-      /* ── Recording indicator ── */
-      const indicator = document.createElement('div');
-      indicator.style.cssText =
-        'position:absolute;top:env(safe-area-inset-top,20px);left:16px;margin-top:12px;' +
-        'display:flex;align-items:center;gap:8px;' +
-        'background:rgba(0,0,0,0.5);backdrop-filter:blur(6px);' +
-        'padding:6px 14px;border-radius:20px;';
-      const dot = document.createElement('span');
-      dot.style.cssText =
-        'width:10px;height:10px;border-radius:50%;background:#ff3b30;' +
-        'animation:blink 1s step-start infinite;';
-      const recLabel = document.createElement('span');
-      recLabel.textContent = 'REC';
-      recLabel.style.cssText = 'color:#fff;font-size:13px;font-weight:700;letter-spacing:1px;';
-      indicator.appendChild(dot);
-      indicator.appendChild(recLabel);
-
-      // Inject blink keyframes once
-      if (!document.getElementById('_rec_style')) {
-        const style = document.createElement('style');
-        style.id = '_rec_style';
-        style.textContent = '@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}';
-        document.head.appendChild(style);
-      }
-
       /* ── Stop & Save button ── */
       const stopBtn = document.createElement('button');
       stopBtn.textContent = 'Stop & Save';
@@ -143,7 +118,6 @@ function openCameraAndRecord() {
 
       /* ── Assemble and inject ── */
       overlay.appendChild(video);
-      overlay.appendChild(indicator);
       overlay.appendChild(stopBtn);
       document.body.appendChild(overlay);
 
