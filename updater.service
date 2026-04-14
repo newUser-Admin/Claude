@@ -1,0 +1,27 @@
+[Unit]
+Description=Persistent Update Software Daemon
+Documentation=file:///home/user/Claude/README_updater.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change User/Group to a non-root account if not running system-level updates
+User=root
+Group=root
+WorkingDirectory=/home/user/Claude
+ExecStart=/usr/bin/python3 /home/user/Claude/updater_daemon.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=updater-daemon
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

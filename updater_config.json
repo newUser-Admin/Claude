@@ -1,0 +1,13 @@
+{
+  "interval_seconds": 3600,
+  "auto_apply": false,
+  "sources": {
+    "apt": true,
+    "pip": true,
+    "npm": false
+  },
+  "notify_only": true,
+  "log_level": "INFO",
+  "max_log_bytes": 5242880,
+  "backup_log_count": 3
+}
