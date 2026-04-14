@@ -20,18 +20,18 @@ function CameraRecorder(opts) {
   this.stream   = null;
   this.recorder = null;
   this._chunks  = [];
-  this._mimeType = CameraRecorder._pickMime();
-}
 
-CameraRecorder._pickMime = function() {
+  // Inline MIME detection — avoids static method assignment timing issues
   var candidates = ['video/mp4', 'video/mp4;codecs=avc1', 'video/quicktime', ''];
+  this._mimeType = '';
   for (var i = 0; i < candidates.length; i++) {
-    if (candidates[i] === '' || MediaRecorder.isTypeSupported(candidates[i])) {
-      return candidates[i];
+    if (candidates[i] === '' ||
+        (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(candidates[i]))) {
+      this._mimeType = candidates[i];
+      break;
     }
   }
-  return '';
-};
+}
 
 /** Acquires the camera stream. Returns a Promise. */
 CameraRecorder.prototype.open = function() {
