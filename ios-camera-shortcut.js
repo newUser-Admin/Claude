@@ -289,38 +289,37 @@ class EyeTrackingTest {
     };
   }
 
-  async start() {
+  start() {
     const { duration, pattern, dotRadius, dotColor, bgColor, showProgress,
             facingMode, audio, filename, onComplete, onError } = this.opts;
 
     const cam  = new CameraRecorder({ facingMode, audio });
     const anim = new DotAnimator({ pattern, duration, dotRadius, dotColor, bgColor, showProgress });
 
-    try {
-      await cam.open();
-    } catch (err) {
-      onError ? onError(err) : completion('Error: ' + err.message);
-      return;
-    }
-
-    // Signal Shortcuts immediately so the action doesn't time out
+    // Call completion() synchronously before any async work so Shortcuts
+    // doesn't time out waiting for it inside a Promise/microtask.
     completion('Eye tracking test started');
 
-    cam.startRecording();
-    anim.mount();
-
-    await anim.run(); // resolves when duration elapses
-
-    anim.showMessage('Test complete — saving…');
-
-    const blob = await cam.stopRecording();
-    const sizeMB = (blob.size / 1_048_576).toFixed(2);
-
-    CameraRecorder.saveBlob(blob, filename);
-
-    setTimeout(() => anim.unmount(), 3000);
-
-    onComplete?.(blob, sizeMB);
+    cam.open()
+      .then(() => {
+        cam.startRecording();
+        anim.mount();
+        return anim.run(); // resolves when duration elapses
+      })
+      .then(() => {
+        anim.showMessage('Test complete — saving…');
+        return cam.stopRecording();
+      })
+      .then((blob) => {
+        const sizeMB = (blob.size / 1_048_576).toFixed(2);
+        CameraRecorder.saveBlob(blob, filename);
+        setTimeout(() => anim.unmount(), 3000);
+        onComplete?.(blob, sizeMB);
+      })
+      .catch((err) => {
+        anim.unmount();
+        onError?.(err);
+      });
   }
 }
 
