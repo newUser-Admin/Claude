@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>iOS Lock Screen</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    body {
+      font-family: -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+      overflow: hidden;
+      background: #000;
+    }
+
+    /* ── Background ── */
+    #overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      padding: 60px 0 40px;
+      background:
+        linear-gradient(160deg,
+          rgba(15, 25, 60, 0.92) 0%,
+          rgba(8, 8, 30, 0.97) 60%,
+          rgba(20, 10, 40, 0.98) 100%),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='800'%3E%3Crect fill='%23090820' width='400' height='800'/%3E%3Ccircle cx='200' cy='200' r='180' fill='%23151538' opacity='.6'/%3E%3Ccircle cx='320' cy='600' r='140' fill='%230d0d2a' opacity='.5'/%3E%3C/svg%3E") center/cover;
+      transition: background 0.05s;
+    }
+
+    /* ── Strobe overlay ── */
+    #strobe {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      pointer-events: none;
+      opacity: 0;
+    }
+
+    /* ── Time & Date ── */
+    #clock-section {
+      text-align: center;
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    #time {
+      font-size: clamp(72px, 18vw, 96px);
+      font-weight: 200;
+      letter-spacing: -2px;
+      line-height: 1;
+      text-shadow: 0 2px 20px rgba(0,0,0,0.5);
+    }
+
+    #date {
+      font-size: clamp(16px, 4vw, 20px);
+      font-weight: 400;
+      margin-top: 6px;
+      opacity: 0.9;
+      letter-spacing: 0.2px;
+    }
+
+    /* ── Passcode section ── */
+    #passcode-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+      flex-shrink: 0;
+    }
+
+    #passcode-label {
+      color: #fff;
+      font-size: clamp(15px, 3.5vw, 18px);
+      font-weight: 400;
+      letter-spacing: 0.1px;
+    }
+
+    #dots {
+      display: flex;
+      gap: 20px;
+    }
+
+    .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1.5px solid rgba(255,255,255,0.85);
+      background: transparent;
+      transition: background 0.12s ease, transform 0.1s ease;
+    }
+
+    .dot.filled {
+      background: #fff;
+      transform: scale(1.15);
+    }
+
+    .dot.shake {
+      animation: shake 0.4s ease;
+    }
+
+    /* ── Wrong-attempt message ── */
+    #attempt-msg {
+      color: rgba(255,255,255,0.0);
+      font-size: 13px;
+      font-weight: 400;
+      letter-spacing: 0.1px;
+      min-height: 18px;
+      transition: color 0.2s;
+    }
+
+    #attempt-msg.visible {
+      color: rgba(255, 120, 120, 0.95);
+    }
+
+    /* ── Keypad ── */
+    #keypad {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: clamp(10px, 2.5vw, 16px);
+      width: min(320px, 88vw);
+      flex-shrink: 0;
+    }
+
+    .key {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.18);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: none;
+      cursor: pointer;
+      color: #fff;
+      transition: background 0.12s, transform 0.08s;
+      -webkit-touch-callout: none;
+    }
+
+    .key:active,
+    .key.pressed {
+      background: rgba(255,255,255,0.42);
+      transform: scale(0.93);
+    }
+
+    .key-num {
+      font-size: clamp(26px, 7vw, 34px);
+      font-weight: 300;
+      line-height: 1;
+    }
+
+    .key-letters {
+      font-size: clamp(8px, 2vw, 10px);
+      font-weight: 500;
+      letter-spacing: 2px;
+      opacity: 0.6;
+      margin-top: 1px;
+      text-transform: uppercase;
+    }
+
+    .key.empty {
+      background: transparent;
+      pointer-events: none;
+      cursor: default;
+    }
+
+    .key.delete {
+      font-size: clamp(18px, 5vw, 24px);
+    }
+
+    /* ── Bottom bar ── */
+    #bottom-bar {
+      display: flex;
+      justify-content: space-between;
+      width: min(320px, 88vw);
+      flex-shrink: 0;
+    }
+
+    .bottom-btn {
+      color: rgba(255,255,255,0.85);
+      font-size: clamp(13px, 3.2vw, 15px);
+      font-weight: 400;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px 4px;
+    }
+
+    .bottom-btn:active { opacity: 0.5; }
+
+    /* ── Animations ── */
+    @keyframes shake {
+      0%   { transform: translateX(0); }
+      15%  { transform: translateX(-7px); }
+      30%  { transform: translateX(7px); }
+      45%  { transform: translateX(-5px); }
+      60%  { transform: translateX(5px); }
+      75%  { transform: translateX(-3px); }
+      90%  { transform: translateX(3px); }
+      100% { transform: translateX(0); }
+    }
+
+    @keyframes dot-shake {
+      0%   { transform: translateX(0); }
+      20%  { transform: translateX(-8px); }
+      40%  { transform: translateX(8px); }
+      60%  { transform: translateX(-5px); }
+      80%  { transform: translateX(5px); }
+      100% { transform: translateX(0); }
+    }
+
+    #dots.shake {
+      animation: dot-shake 0.45s ease;
+    }
+
+    /* ── Busted screen ── */
+    #busted-msg {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 10001;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      text-align: center;
+      padding: 40px;
+      gap: 16px;
+    }
+
+    #busted-msg.show {
+      display: flex;
+    }
+
+    #busted-msg h1 {
+      font-size: clamp(28px, 8vw, 42px);
+      font-weight: 700;
+      color: #fff;
+      text-shadow: 0 0 30px rgba(255,50,50,0.8);
+      letter-spacing: -0.5px;
+    }
+
+    #busted-msg p {
+      font-size: clamp(14px, 3.5vw, 18px);
+      color: rgba(255,255,255,0.8);
+    }
+  </style>
+</head>
+<body>
+
+<!-- Strobe layer -->
+<div id="strobe"></div>
+
+<!-- iOS Overlay -->
+<div id="overlay">
+
+  <!-- Time & Date -->
+  <div id="clock-section">
+    <div id="time">9:41</div>
+    <div id="date">Monday, January 9</div>
+  </div>
+
+  <!-- Passcode entry -->
+  <div id="passcode-section">
+    <div id="passcode-label">Enter Passcode</div>
+    <div id="dots">
+      <div class="dot" data-i="0"></div>
+      <div class="dot" data-i="1"></div>
+      <div class="dot" data-i="2"></div>
+      <div class="dot" data-i="3"></div>
+    </div>
+    <div id="attempt-msg"></div>
+  </div>
+
+  <!-- Number pad -->
+  <div id="keypad">
+    <button class="key" data-val="1"><span class="key-num">1</span><span class="key-letters"></span></button>
+    <button class="key" data-val="2"><span class="key-num">2</span><span class="key-letters">ABC</span></button>
+    <button class="key" data-val="3"><span class="key-num">3</span><span class="key-letters">DEF</span></button>
+    <button class="key" data-val="4"><span class="key-num">4</span><span class="key-letters">GHI</span></button>
+    <button class="key" data-val="5"><span class="key-num">5</span><span class="key-letters">JKL</span></button>
+    <button class="key" data-val="6"><span class="key-num">6</span><span class="key-letters">MNO</span></button>
+    <button class="key" data-val="7"><span class="key-num">7</span><span class="key-letters">PQRS</span></button>
+    <button class="key" data-val="8"><span class="key-num">8</span><span class="key-letters">TUV</span></button>
+    <button class="key" data-val="9"><span class="key-num">9</span><span class="key-letters">WXYZ</span></button>
+    <button class="key empty"></button>
+    <button class="key" data-val="0"><span class="key-num">0</span><span class="key-letters"></span></button>
+    <button class="key delete" id="del-btn" aria-label="Delete">⌫</button>
+  </div>
+
+  <!-- Bottom bar -->
+  <div id="bottom-bar">
+    <button class="bottom-btn">Emergency</button>
+    <button class="bottom-btn" id="cancel-btn">Cancel</button>
+  </div>
+
+</div>
+
+<!-- "Busted" overlay shown during strobe -->
+<div id="busted-msg">
+  <h1>DEVICE LOCKED</h1>
+  <p>Too many failed attempts.<br>Connect to iTunes to restore.</p>
+</div>
+
+<script>
+  /* ────────────────────────────────────────────
+     Clock
+  ──────────────────────────────────────────── */
+  (function updateClock() {
+    const timeEl = document.getElementById('time');
+    const dateEl = document.getElementById('date');
+    const days  = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const months = ['January','February','March','April','May','June',
+                    'July','August','September','October','November','December'];
+    function tick() {
+      const now = new Date();
+      let h = now.getHours(), m = now.getMinutes();
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      h = h % 12 || 12;
+      timeEl.textContent = `${h}:${String(m).padStart(2,'0')}`;
+      dateEl.textContent = `${days[now.getDay()]}, ${months[now.getMonth()]} ${now.getDate()}`;
+    }
+    tick();
+    setInterval(tick, 10000);
+  })();
+
+  /* ────────────────────────────────────────────
+     State
+  ──────────────────────────────────────────── */
+  const CORRECT_PIN   = '1234';   // change to whatever you like
+  const MAX_WRONG     = 2;
+
+  let entered      = '';
+  let wrongCount   = 0;
+  let locked       = false;
+  let torchStream  = null;
+  let torchTrack   = null;
+
+  /* ────────────────────────────────────────────
+     DOM refs
+  ──────────────────────────────────────────── */
+  const dots       = document.querySelectorAll('.dot');
+  const dotsRow    = document.getElementById('dots');
+  const attemptMsg = document.getElementById('attempt-msg');
+  const strobe     = document.getElementById('strobe');
+  const busted     = document.getElementById('busted-msg');
+
+  /* ────────────────────────────────────────────
+     Update dots display
+  ──────────────────────────────────────────── */
+  function refreshDots() {
+    dots.forEach((d, i) => {
+      d.classList.toggle('filled', i < entered.length);
+    });
+  }
+
+  /* ────────────────────────────────────────────
+     Key press
+  ──────────────────────────────────────────── */
+  function pressKey(val) {
+    if (locked || entered.length >= 4) return;
+    entered += val;
+    refreshDots();
+    if (entered.length === 4) {
+      setTimeout(checkPin, 150);
+    }
+  }
+
+  function pressDelete() {
+    if (locked) return;
+    entered = entered.slice(0, -1);
+    refreshDots();
+  }
+
+  /* ────────────────────────────────────────────
+     Check PIN
+  ──────────────────────────────────────────── */
+  function checkPin() {
+    if (entered === CORRECT_PIN) {
+      // Correct — dismiss overlay
+      document.getElementById('overlay').style.transition = 'opacity 0.5s';
+      document.getElementById('overlay').style.opacity   = '0';
+      setTimeout(() => document.getElementById('overlay').remove(), 500);
+      return;
+    }
+
+    // Wrong
+    wrongCount++;
+    entered = '';
+    refreshDots();
+
+    // Shake dots
+    dotsRow.classList.remove('shake');
+    void dotsRow.offsetWidth; // reflow
+    dotsRow.classList.add('shake');
+    dotsRow.addEventListener('animationend', () => dotsRow.classList.remove('shake'), { once: true });
+
+    if (wrongCount < MAX_WRONG) {
+      const remaining = MAX_WRONG - wrongCount;
+      attemptMsg.textContent = `Incorrect passcode — ${remaining} attempt${remaining > 1 ? 's' : ''} remaining`;
+      attemptMsg.classList.add('visible');
+    } else {
+      // Trigger the alarm
+      triggerAlarm();
+    }
+  }
+
+  /* ────────────────────────────────────────────
+     Flashlight via camera torch
+  ──────────────────────────────────────────── */
+  async function acquireTorch() {
+    try {
+      torchStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { exact: 'environment' } }
+      });
+      torchTrack = torchStream.getVideoTracks()[0];
+    } catch (e) {
+      // Torch unavailable (desktop / permission denied) — silent fallback
+      torchTrack = null;
+    }
+  }
+
+  async function setTorch(on) {
+    if (!torchTrack) return;
+    try {
+      await torchTrack.applyConstraints({ advanced: [{ torch: on }] });
+    } catch (_) { /* not supported */ }
+  }
+
+  function releaseTorch() {
+    if (torchStream) {
+      torchStream.getTracks().forEach(t => t.stop());
+      torchStream = null;
+      torchTrack  = null;
+    }
+  }
+
+  /* ────────────────────────────────────────────
+     Alarm — red/blue strobe + torch
+  ──────────────────────────────────────────── */
+  async function triggerAlarm() {
+    locked = true;
+    busted.classList.add('show');
+    attemptMsg.classList.remove('visible');
+
+    await acquireTorch();
+
+    const DURATION    = 6000;  // ms total strobe
+    const FLASH_HALF  = 120;   // ms per half-cycle (red → blue)
+
+    let phase      = 0;   // 0 = red, 1 = blue
+    let torchOn    = false;
+    let elapsed    = 0;
+    let lastTime   = performance.now();
+
+    function frame(now) {
+      const dt = now - lastTime;
+      lastTime  = now;
+      elapsed  += dt;
+
+      if (elapsed >= DURATION) {
+        // Stop
+        strobe.style.opacity = '0';
+        releaseTorch();
+        setTorch(false);
+        busted.classList.remove('show');
+        locked = false;
+        wrongCount = 0;
+        attemptMsg.textContent = '';
+        return;
+      }
+
+      // Toggle strobe color
+      const cyclePos = elapsed % (FLASH_HALF * 2);
+      if (cyclePos < FLASH_HALF) {
+        strobe.style.background = 'rgba(255, 30, 30, 0.55)';
+        strobe.style.opacity    = '1';
+      } else {
+        strobe.style.background = 'rgba(20, 80, 255, 0.55)';
+        strobe.style.opacity    = '1';
+      }
+
+      // Toggle torch every half-cycle
+      const newTorchOn = cyclePos < FLASH_HALF;
+      if (newTorchOn !== torchOn) {
+        torchOn = newTorchOn;
+        setTorch(torchOn);
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  /* ────────────────────────────────────────────
+     Keypad event wiring
+  ──────────────────────────────────────────── */
+  document.getElementById('keypad').addEventListener('pointerdown', e => {
+    const key = e.target.closest('.key');
+    if (!key || key.classList.contains('empty')) return;
+
+    key.classList.add('pressed');
+    key.addEventListener('pointerup',    () => key.classList.remove('pressed'), { once: true });
+    key.addEventListener('pointerleave', () => key.classList.remove('pressed'), { once: true });
+
+    if (key.id === 'del-btn') {
+      pressDelete();
+    } else if (key.dataset.val) {
+      pressKey(key.dataset.val);
+    }
+  });
+
+  document.getElementById('cancel-btn').addEventListener('click', () => {
+    entered = '';
+    refreshDots();
+    attemptMsg.classList.remove('visible');
+  });
+
+  /* ────────────────────────────────────────────
+     Keyboard support (desktop testing)
+  ──────────────────────────────────────────── */
+  document.addEventListener('keydown', e => {
+    if (e.key >= '0' && e.key <= '9') pressKey(e.key);
+    if (e.key === 'Backspace') pressDelete();
+  });
+</script>
+</body>
+</html>
