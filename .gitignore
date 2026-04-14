@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+updater.log
+updater.log.*
+updater.pid
+updater_state.json
