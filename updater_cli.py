@@ -4,15 +4,19 @@ Persistent Update Software — CLI Management Tool
 Controls the running daemon, displays status, and edits configuration.
 
 Usage:
-  updater_cli.py status      — Show daemon status and last update info
-  updater_cli.py start       — Start the daemon in the background
-  updater_cli.py stop        — Stop the daemon gracefully
-  updater_cli.py restart     — Restart the daemon
-  updater_cli.py run-once    — Run a single update cycle (foreground)
-  updater_cli.py config show — Print current configuration
+  updater_cli.py status           — Show daemon status and last update info
+  updater_cli.py start            — Start the daemon in the background
+  updater_cli.py stop             — Stop the daemon gracefully
+  updater_cli.py restart          — Restart the daemon
+  updater_cli.py run-once         — Run a single update cycle (foreground)
+  updater_cli.py config show      — Print current configuration
   updater_cli.py config set KEY VALUE — Update a config value
-  updater_cli.py history     — Show update history
-  updater_cli.py logs [N]    — Tail last N lines of the log (default 40)
+  updater_cli.py history          — Show update history
+  updater_cli.py logs [N]         — Tail last N lines of the log (default 40)
+  updater_cli.py ps               — Show daemon process info (PID, memory, workers)
+  updater_cli.py health           — Run a health check on the daemon
+  updater_cli.py priority NICE    — Set daemon scheduling priority (-20 to 19)
+  updater_cli.py kill-worker PID  — Terminate a stuck worker subprocess
 """
 
 import os
@@ -21,6 +25,7 @@ import json
 import signal
 import argparse
 import subprocess
+import process_manager as pm
 from pathlib import Path
 from datetime import datetime
 
@@ -265,6 +270,53 @@ def cmd_logs(args):
 
 
 # ---------------------------------------------------------------------------
+# Process management commands
+# ---------------------------------------------------------------------------
+def cmd_ps(_args):
+    info = pm.daemon_info()
+    print(bold("=== Daemon Process Info ==="))
+    print(pm.format_info(info))
+
+
+def cmd_health(_args):
+    result = pm.health_check()
+    print(bold("=== Health Check ==="))
+    if result["healthy"]:
+        print(f"  Status : {ok('HEALTHY')}")
+    else:
+        print(f"  Status : {err('UNHEALTHY')}")
+    print(f"  Reason : {result['reason']}")
+    if result["pid"]:
+        print(f"  PID    : {result['pid']}")
+
+
+def cmd_priority(args):
+    nice = args.nice
+    if not (-20 <= nice <= 19):
+        print(err("Nice value must be between -20 and 19"))
+        sys.exit(1)
+    if pm.set_priority(nice):
+        print(ok(f"Daemon scheduling priority set to {nice}"))
+    else:
+        print(err("Failed to set priority — daemon not running or insufficient permissions"))
+        sys.exit(1)
+
+
+def cmd_kill_worker(args):
+    cpid = args.pid
+    force = getattr(args, "force", False)
+    if pm.kill_worker(cpid, force=force):
+        sig = "SIGKILL" if force else "SIGTERM"
+        print(ok(f"Sent {sig} to worker PID {cpid}"))
+    else:
+        print(err(
+            f"Could not signal PID {cpid} — not a daemon child, "
+            "or daemon is not running"
+        ))
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -295,6 +347,19 @@ def build_parser() -> argparse.ArgumentParser:
     logs_p = sub.add_parser("logs", help="Tail the log file")
     logs_p.add_argument("n", nargs="?", type=int, default=40, help="Number of lines (default 40)")
 
+    # Process management
+    sub.add_parser("ps", help="Show daemon process info (PID, memory, workers)")
+    sub.add_parser("health", help="Health check — state, zombie/D-state detection")
+
+    pri_p = sub.add_parser("priority", help="Set daemon scheduling priority")
+    pri_p.add_argument("nice", type=int, metavar="NICE",
+                       help="Nice value: -20 (highest) to 19 (lowest)")
+
+    kw_p = sub.add_parser("kill-worker", help="Terminate a stuck worker subprocess")
+    kw_p.add_argument("pid", type=int, metavar="PID", help="Worker PID to terminate")
+    kw_p.add_argument("--force", action="store_true",
+                      help="Use SIGKILL instead of SIGTERM")
+
     return p
 
 
@@ -310,6 +375,10 @@ def main():
         "run-once": cmd_run_once,
         "history": cmd_history,
         "logs": cmd_logs,
+        "ps": cmd_ps,
+        "health": cmd_health,
+        "priority": cmd_priority,
+        "kill-worker": cmd_kill_worker,
     }
 
     if args.command is None:
