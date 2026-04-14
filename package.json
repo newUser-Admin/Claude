@@ -1,0 +1,18 @@
+{
+  "name": "claude-tools",
+  "version": "1.0.0",
+  "description": "AI interaction tools: response filter, interaction engine, and WebSocket shell",
+  "main": "shell-server.js",
+  "scripts": {
+    "start": "node shell-server.js",
+    "start:shell": "node shell-server.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
