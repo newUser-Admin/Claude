@@ -3,17 +3,25 @@ Description=Persistent Update Software Daemon
 Documentation=file:///home/user/Claude/README_updater.md
 After=network-online.target
 Wants=network-online.target
+# Restart if the watchdog timer fires (requires WatchdogSec below)
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
-# Change User/Group to a non-root account if not running system-level updates
 User=root
 Group=root
 WorkingDirectory=/home/user/Claude
 ExecStart=/usr/bin/python3 /home/user/Claude/updater_daemon.py
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=30
+
+# Always restart — covers crashes, OOM kills, and clean exits
+Restart=always
+RestartSec=15
+
+# If the process is silent for 5 minutes, systemd kills and restarts it
+WatchdogSec=300
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=updater-daemon

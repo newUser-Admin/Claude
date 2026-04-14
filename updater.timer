@@ -1,0 +1,14 @@
+# Secondary watchdog timer — ensures the service is active even if
+# systemd's own restart logic gets stuck (e.g. after StartLimitBurst).
+[Unit]
+Description=Watchdog timer for Persistent Update Software Daemon
+Requires=updater.service
+
+[Timer]
+# Fire 2 minutes after boot, then every 10 minutes
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=updater.service
+
+[Install]
+WantedBy=timers.target
