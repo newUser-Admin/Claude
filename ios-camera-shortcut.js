@@ -1,5 +1,3 @@
-completion("Eye tracking test started");
-
 /**
  * CameraRecorder
  * Handles getUserMedia, MediaRecorder, and saving the resulting Blob.
@@ -49,6 +47,8 @@ CameraRecorder.prototype.open = function() {
 /** Begins recording. Call open() first. */
 CameraRecorder.prototype.startRecording = function() {
   if (!this.stream) throw new Error('Call open() before startRecording().');
+  // completion() reflects this module executing when used standalone.
+  completion('CameraRecorder: recording started (' + this.constraints.video.facingMode + ' camera)');
   this._chunks = [];
   var opts = this._mimeType ? { mimeType: this._mimeType } : {};
   this.recorder = new MediaRecorder(this.stream, opts);
@@ -279,6 +279,10 @@ function EyeTrackingTest(opts) {
 }
 
 EyeTrackingTest.prototype.start = function() {
+  // completion() is the first synchronous statement so Shortcuts receives
+  // a result that reflects this specific module executing.
+  completion('EyeTrackingTest: running (' + this.opts.pattern + ', ' + this.opts.duration + 'ms)');
+
   var o    = this.opts;
   var cam  = new CameraRecorder({ facingMode: o.facingMode, audio: o.audio });
   var anim = new DotAnimator({
@@ -316,8 +320,8 @@ EyeTrackingTest.prototype.start = function() {
  * Entry point — paste the built ios-camera-shortcut.js into the
  * iOS Shortcuts "Run JavaScript on Webpage" action.
  *
- * completion() is injected as the first line of the built file by
- * build.sh — before any module code — so it always runs first.
+ * completion() is called by each module as its first synchronous
+ * statement, reflecting which module is actually executing.
  */
 
 // ── Configuration ─────────────────────────────────────────────────────────────

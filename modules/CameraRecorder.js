@@ -47,6 +47,8 @@ CameraRecorder.prototype.open = function() {
 /** Begins recording. Call open() first. */
 CameraRecorder.prototype.startRecording = function() {
   if (!this.stream) throw new Error('Call open() before startRecording().');
+  // completion() reflects this module executing when used standalone.
+  completion('CameraRecorder: recording started (' + this.constraints.video.facingMode + ' camera)');
   this._chunks = [];
   var opts = this._mimeType ? { mimeType: this._mimeType } : {};
   this.recorder = new MediaRecorder(this.stream, opts);

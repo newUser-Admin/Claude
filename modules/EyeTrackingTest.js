@@ -37,6 +37,10 @@ function EyeTrackingTest(opts) {
 }
 
 EyeTrackingTest.prototype.start = function() {
+  // completion() is the first synchronous statement so Shortcuts receives
+  // a result that reflects this specific module executing.
+  completion('EyeTrackingTest: running (' + this.opts.pattern + ', ' + this.opts.duration + 'ms)');
+
   var o    = this.opts;
   var cam  = new CameraRecorder({ facingMode: o.facingMode, audio: o.audio });
   var anim = new DotAnimator({

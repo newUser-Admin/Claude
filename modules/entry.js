@@ -2,8 +2,8 @@
  * Entry point — paste the built ios-camera-shortcut.js into the
  * iOS Shortcuts "Run JavaScript on Webpage" action.
  *
- * completion() is injected as the first line of the built file by
- * build.sh — before any module code — so it always runs first.
+ * completion() is called by each module as its first synchronous
+ * statement, reflecting which module is actually executing.
  */
 
 // ── Configuration ─────────────────────────────────────────────────────────────
