@@ -296,9 +296,7 @@ class EyeTrackingTest {
     const cam  = new CameraRecorder({ facingMode, audio });
     const anim = new DotAnimator({ pattern, duration, dotRadius, dotColor, bgColor, showProgress });
 
-    // Call completion() synchronously before any async work so Shortcuts
-    // doesn't time out waiting for it inside a Promise/microtask.
-    completion('Eye tracking test started');
+    // completion() is called at the top-level scope below, not here.
 
     cam.open()
       .then(() => {
@@ -325,6 +323,10 @@ class EyeTrackingTest {
 
 
 // ── Run ───────────────────────────────────────────────────────────────────────
+// completion() MUST be called at the top-level script scope — Shortcuts does
+// not recognise it when called from inside a class method or Promise chain.
+completion('Eye tracking test started');
+
 new EyeTrackingTest({
   duration:     30_000,       // ms
   pattern:      'lissajous',  // 'lissajous' | 'horizontal' | 'circular'
