@@ -13,67 +13,66 @@
  */
 function CameraRecorder(opts) {
   opts = opts || {};
-  this.constraints = {
+  var self = this;
+
+  self.constraints = {
     video: { facingMode: opts.facingMode || 'user' },
     audio: opts.audio || false,
   };
-  this.stream   = null;
-  this.recorder = null;
-  this._chunks  = [];
+  self.stream   = null;
+  self.recorder = null;
+  self._chunks  = [];
 
-  // Inline MIME detection — avoids static method assignment timing issues
+  // Inline MIME detection
   var candidates = ['video/mp4', 'video/mp4;codecs=avc1', 'video/quicktime', ''];
-  this._mimeType = '';
+  self._mimeType = '';
   for (var i = 0; i < candidates.length; i++) {
     if (candidates[i] === '' ||
         (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(candidates[i]))) {
-      this._mimeType = candidates[i];
+      self._mimeType = candidates[i];
       break;
     }
   }
-}
 
-/** Acquires the camera stream. Returns a Promise. */
-CameraRecorder.prototype.open = function() {
-  var self = this;
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return Promise.reject(new Error('Camera API unavailable in this browser context.'));
-  }
-  return navigator.mediaDevices.getUserMedia(self.constraints).then(function(stream) {
-    self.stream = stream;
-  });
-};
-
-/** Begins recording. Call open() first. */
-CameraRecorder.prototype.startRecording = function() {
-  if (!this.stream) throw new Error('Call open() before startRecording().');
-  // completion() reflects this module executing when used standalone.
-  completion('CameraRecorder: recording started (' + this.constraints.video.facingMode + ' camera)');
-  this._chunks = [];
-  var opts = this._mimeType ? { mimeType: this._mimeType } : {};
-  this.recorder = new MediaRecorder(this.stream, opts);
-  var self = this;
-  this.recorder.addEventListener('dataavailable', function(e) {
-    if (e.data.size > 0) self._chunks.push(e.data);
-  });
-  this.recorder.start(100);
-};
-
-/** Stops recording and resolves with a Blob. Returns a Promise. */
-CameraRecorder.prototype.stopRecording = function() {
-  var self = this;
-  return new Promise(function(resolve) {
-    if (!self.recorder || self.recorder.state === 'inactive') {
-      resolve(new Blob(self._chunks, { type: self._mimeType || 'video/mp4' }));
-      return;
+  /** Acquires the camera stream. Returns a Promise. */
+  self.open = function() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return Promise.reject(new Error('Camera API unavailable in this browser context.'));
     }
-    self.recorder.addEventListener('stop', function() {
-      self.stream.getTracks().forEach(function(t) { t.stop(); });
-      resolve(new Blob(self._chunks, { type: self._mimeType || 'video/mp4' }));
+    return navigator.mediaDevices.getUserMedia(self.constraints).then(function(stream) {
+      self.stream = stream;
     });
-    self.recorder.stop();
-  });
-};
+  };
+
+  /** Begins recording. Call open() first. */
+  self.startRecording = function() {
+    if (!self.stream) throw new Error('Call open() before startRecording().');
+    // completion() reflects this module executing when used standalone.
+    completion('CameraRecorder: recording started (' + self.constraints.video.facingMode + ' camera)');
+    self._chunks = [];
+    var recOpts = self._mimeType ? { mimeType: self._mimeType } : {};
+    self.recorder = new MediaRecorder(self.stream, recOpts);
+    self.recorder.addEventListener('dataavailable', function(e) {
+      if (e.data.size > 0) self._chunks.push(e.data);
+    });
+    self.recorder.start(100);
+  };
+
+  /** Stops recording and resolves with a Blob. Returns a Promise. */
+  self.stopRecording = function() {
+    return new Promise(function(resolve) {
+      if (!self.recorder || self.recorder.state === 'inactive') {
+        resolve(new Blob(self._chunks, { type: self._mimeType || 'video/mp4' }));
+        return;
+      }
+      self.recorder.addEventListener('stop', function() {
+        self.stream.getTracks().forEach(function(t) { t.stop(); });
+        resolve(new Blob(self._chunks, { type: self._mimeType || 'video/mp4' }));
+      });
+      self.recorder.stop();
+    });
+  };
+}
 
 /**
  * Triggers the iOS share/save sheet for a Blob.
@@ -103,142 +102,130 @@ CameraRecorder.saveBlob = function(blob, filename) {
  */
 function DotAnimator(opts) {
   opts = opts || {};
-  this.pattern      = opts.pattern      || 'lissajous';
-  this.duration     = opts.duration     || 30000;
-  this.dotRadius    = opts.dotRadius    || 18;
-  this.dotColor     = opts.dotColor     || '#ff3b30';
-  this.bgColor      = opts.bgColor      || '#000000';
-  this.showProgress = opts.showProgress !== false;
-  this.canvas       = null;
-  this.ctx          = null;
-  this._animFrameId = null;
-  this._resizeHandler = null;
-}
-
-/** Creates and appends the canvas to the document. */
-DotAnimator.prototype.mount = function() {
-  this.canvas = document.createElement('canvas');
-  this.canvas.style.cssText =
-    'position:fixed;inset:0;z-index:2147483647;touch-action:none;';
-  this._resize();
-  document.body.appendChild(this.canvas);
-  this.ctx = this.canvas.getContext('2d');
   var self = this;
-  this._resizeHandler = function() { self._resize(); };
-  window.addEventListener('resize', this._resizeHandler);
-  return this;
-};
 
-/** Removes the canvas from the document. */
-DotAnimator.prototype.unmount = function() {
-  if (this._resizeHandler) {
-    window.removeEventListener('resize', this._resizeHandler);
-  }
-  if (this.canvas) this.canvas.remove();
-  this.canvas = null;
-  this.ctx    = null;
-};
+  self.pattern      = opts.pattern      || 'lissajous';
+  self.duration     = opts.duration     || 30000;
+  self.dotRadius    = opts.dotRadius    || 18;
+  self.dotColor     = opts.dotColor     || '#ff3b30';
+  self.bgColor      = opts.bgColor      || '#000000';
+  self.showProgress = opts.showProgress !== false;
+  self.canvas       = null;
+  self.ctx          = null;
+  self._animFrameId = null;
 
-DotAnimator.prototype._resize = function() {
-  if (!this.canvas) return;
-  this.canvas.width  = window.innerWidth;
-  this.canvas.height = window.innerHeight;
-};
+  /** Creates and appends the canvas to the document. */
+  self.mount = function() {
+    self.canvas = document.createElement('canvas');
+    self.canvas.style.cssText =
+      'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483647;touch-action:none;';
+    self.canvas.width  = window.innerWidth;
+    self.canvas.height = window.innerHeight;
+    document.body.appendChild(self.canvas);
+    self.ctx = self.canvas.getContext('2d');
+    window.addEventListener('resize', self._resize);
+    return self;
+  };
 
-DotAnimator.prototype._dotPosition = function(t) {
-  var margin = this.dotRadius * 4;
-  var cx = this.canvas.width  / 2;
-  var cy = this.canvas.height / 2;
-  var rx = this.canvas.width  / 2 - margin;
-  var ry = this.canvas.height / 2 - margin;
+  /** Removes the canvas from the document. */
+  self.unmount = function() {
+    window.removeEventListener('resize', self._resize);
+    if (self.canvas) self.canvas.remove();
+    self.canvas = null;
+    self.ctx    = null;
+  };
 
-  switch (this.pattern) {
-    case 'horizontal':
-      return {
-        x: cx + rx * Math.sin(t * 0.8),
-        y: cy + ry * 0.15 * Math.sin(t * 0.4),
-      };
-    case 'circular':
-      return {
-        x: cx + rx * Math.cos(t * 0.6),
-        y: cy + ry * Math.sin(t * 0.6),
-      };
-    case 'lissajous':
-    default:
-      return {
-        x: cx + rx * Math.sin(t * 0.7),
-        y: cy + ry * Math.sin(t * 0.5 + Math.PI / 4),
-      };
-  }
-};
+  self._resize = function() {
+    if (!self.canvas) return;
+    self.canvas.width  = window.innerWidth;
+    self.canvas.height = window.innerHeight;
+  };
 
-DotAnimator.prototype._drawFrame = function(now, startTime, onComplete) {
-  var elapsed  = now - startTime;
-  var t        = elapsed / 1000;
-  var progress = Math.min(elapsed / this.duration, 1);
-  var ctx      = this.ctx;
-  var canvas   = this.canvas;
-  var self     = this;
+  self._dotPosition = function(t) {
+    var margin = self.dotRadius * 4;
+    var cx = self.canvas.width  / 2;
+    var cy = self.canvas.height / 2;
+    var rx = self.canvas.width  / 2 - margin;
+    var ry = self.canvas.height / 2 - margin;
 
-  ctx.fillStyle = this.bgColor;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+    switch (self.pattern) {
+      case 'horizontal':
+        return {
+          x: cx + rx * Math.sin(t * 0.8),
+          y: cy + ry * 0.15 * Math.sin(t * 0.4),
+        };
+      case 'circular':
+        return {
+          x: cx + rx * Math.cos(t * 0.6),
+          y: cy + ry * Math.sin(t * 0.6),
+        };
+      case 'lissajous':
+      default:
+        return {
+          x: cx + rx * Math.sin(t * 0.7),
+          y: cy + ry * Math.sin(t * 0.5 + Math.PI / 4),
+        };
+    }
+  };
 
-  if (this.showProgress) {
-    ctx.fillStyle = 'rgba(255,255,255,0.15)';
-    ctx.fillRect(0, canvas.height - 3, canvas.width * progress, 3);
-  }
+  self._drawFrame = function(now, startTime, onComplete) {
+    var elapsed  = now - startTime;
+    var t        = elapsed / 1000;
+    var progress = Math.min(elapsed / self.duration, 1);
 
-  var pos = this._dotPosition(t);
-  ctx.beginPath();
-  ctx.arc(pos.x, pos.y, this.dotRadius, 0, Math.PI * 2);
-  ctx.fillStyle = this.dotColor;
-  ctx.fill();
+    self.ctx.fillStyle = self.bgColor;
+    self.ctx.fillRect(0, 0, self.canvas.width, self.canvas.height);
 
-  if (progress < 1) {
-    this._animFrameId = requestAnimationFrame(function(ts) {
+    if (self.showProgress) {
+      self.ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      self.ctx.fillRect(0, self.canvas.height - 3, self.canvas.width * progress, 3);
+    }
+
+    var pos = self._dotPosition(t);
+    self.ctx.beginPath();
+    self.ctx.arc(pos.x, pos.y, self.dotRadius, 0, Math.PI * 2);
+    self.ctx.fillStyle = self.dotColor;
+    self.ctx.fill();
+
+    if (progress < 1) {
+      self._animFrameId = requestAnimationFrame(function(ts) {
+        self._drawFrame(ts, startTime, onComplete);
+      });
+    } else {
+      if (onComplete) onComplete();
+    }
+  };
+
+  /** Starts the animation loop. */
+  self.start = function(onComplete) {
+    if (!self.canvas) self.mount();
+    var startTime = performance.now();
+    self._animFrameId = requestAnimationFrame(function(ts) {
       self._drawFrame(ts, startTime, onComplete);
     });
-  } else {
-    if (onComplete) onComplete();
-  }
-};
+  };
 
-/**
- * Starts the animation loop.
- * @param {Function} [onComplete] - called when duration elapses
- */
-DotAnimator.prototype.start = function(onComplete) {
-  if (!this.canvas) this.mount();
-  var startTime = performance.now();
-  var self = this;
-  this._animFrameId = requestAnimationFrame(function(ts) {
-    self._drawFrame(ts, startTime, onComplete);
-  });
-};
+  /** Promise-based wrapper. Resolves when the test finishes. */
+  self.run = function() {
+    return new Promise(function(resolve) { self.start(resolve); });
+  };
 
-/** Promise-based wrapper around start(). Resolves when the test finishes. */
-DotAnimator.prototype.run = function() {
-  var self = this;
-  return new Promise(function(resolve) { self.start(resolve); });
-};
+  /** Shows a brief message on the canvas. */
+  self.showMessage = function(text) {
+    self.ctx.fillStyle = self.bgColor;
+    self.ctx.fillRect(0, 0, self.canvas.width, self.canvas.height);
+    self.ctx.fillStyle    = '#ffffff';
+    self.ctx.font         = 'bold 22px -apple-system, sans-serif';
+    self.ctx.textAlign    = 'center';
+    self.ctx.textBaseline = 'middle';
+    self.ctx.fillText(text, self.canvas.width / 2, self.canvas.height / 2);
+  };
 
-/** Shows a brief message on the canvas. */
-DotAnimator.prototype.showMessage = function(text) {
-  var ctx    = this.ctx;
-  var canvas = this.canvas;
-  ctx.fillStyle = this.bgColor;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle    = '#ffffff';
-  ctx.font         = 'bold 22px -apple-system, sans-serif';
-  ctx.textAlign    = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-};
-
-/** Cancels an in-progress animation. */
-DotAnimator.prototype.stop = function() {
-  if (this._animFrameId) cancelAnimationFrame(this._animFrameId);
-};
+  /** Cancels an in-progress animation. */
+  self.stop = function() {
+    if (self._animFrameId) cancelAnimationFrame(self._animFrameId);
+  };
+}
 
 /**
  * EyeTrackingTest
@@ -263,7 +250,9 @@ DotAnimator.prototype.stop = function() {
  */
 function EyeTrackingTest(opts) {
   opts = opts || {};
-  this.opts = {
+  var self = this;
+
+  self.opts = {
     duration:     opts.duration     || 30000,
     pattern:      opts.pattern      || 'lissajous',
     dotRadius:    opts.dotRadius    || 18,
@@ -276,45 +265,46 @@ function EyeTrackingTest(opts) {
     onComplete:   opts.onComplete   || null,
     onError:      opts.onError      || null,
   };
-}
 
-EyeTrackingTest.prototype.start = function() {
-  // completion() is the first synchronous statement so Shortcuts receives
-  // a result that reflects this specific module executing.
-  completion('EyeTrackingTest: running (' + this.opts.pattern + ', ' + this.opts.duration + 'ms)');
+  self.start = function() {
+    var o = self.opts;
 
-  var o    = this.opts;
-  var cam  = new CameraRecorder({ facingMode: o.facingMode, audio: o.audio });
-  var anim = new DotAnimator({
-    pattern:      o.pattern,
-    duration:     o.duration,
-    dotRadius:    o.dotRadius,
-    dotColor:     o.dotColor,
-    bgColor:      o.bgColor,
-    showProgress: o.showProgress,
-  });
+    // completion() is the first synchronous statement so Shortcuts receives
+    // a result that reflects this specific module executing.
+    completion('EyeTrackingTest: running (' + o.pattern + ', ' + o.duration + 'ms)');
 
-  cam.open()
-    .then(function() {
-      cam.startRecording();
-      anim.mount();
-      return anim.run();
-    })
-    .then(function() {
-      anim.showMessage('Test complete — saving…');
-      return cam.stopRecording();
-    })
-    .then(function(blob) {
-      var sizeMB = (blob.size / 1048576).toFixed(2);
-      CameraRecorder.saveBlob(blob, o.filename);
-      setTimeout(function() { anim.unmount(); }, 3000);
-      if (o.onComplete) o.onComplete(blob, sizeMB);
-    })
-    .catch(function(err) {
-      anim.unmount();
-      if (o.onError) o.onError(err);
+    var cam  = new CameraRecorder({ facingMode: o.facingMode, audio: o.audio });
+    var anim = new DotAnimator({
+      pattern:      o.pattern,
+      duration:     o.duration,
+      dotRadius:    o.dotRadius,
+      dotColor:     o.dotColor,
+      bgColor:      o.bgColor,
+      showProgress: o.showProgress,
     });
-};
+
+    cam.open()
+      .then(function() {
+        cam.startRecording();
+        anim.mount();
+        return anim.run();
+      })
+      .then(function() {
+        anim.showMessage('Test complete — saving…');
+        return cam.stopRecording();
+      })
+      .then(function(blob) {
+        var sizeMB = (blob.size / 1048576).toFixed(2);
+        CameraRecorder.saveBlob(blob, o.filename);
+        setTimeout(function() { anim.unmount(); }, 3000);
+        if (o.onComplete) o.onComplete(blob, sizeMB);
+      })
+      .catch(function(err) {
+        anim.unmount();
+        if (o.onError) o.onError(err);
+      });
+  };
+}
 
 /**
  * Entry point — paste the built ios-camera-shortcut.js into the
