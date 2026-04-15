@@ -1,0 +1,17 @@
+{
+  "name": "macro-recorder",
+  "version": "1.0.0",
+  "description": "Keystroke & mouse macro recorder with AES-256-GCM encryption tied to system fingerprint",
+  "main": "macro-server.js",
+  "scripts": {
+    "server": "node macro-server.js",
+    "client": "node macro-client.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
