@@ -56,6 +56,23 @@ func Unpack(b [WireLen]byte) WireEvent {
 	}
 }
 
+// DecodeClick extracts the normalised position and button index from a
+// MsgClick WireEvent.
+//
+// The capture backends encode clicks as:
+//
+//	V1 = xFraction + buttonIndex*1000
+//	V2 = yFraction
+//
+// where buttonIndex is 0=left, 1=right, 2=middle.
+// DecodeClick reverses this into separate (x, y, button) values.
+func DecodeClick(v1, v2 float32) (x, y float32, button int) {
+	button = int(v1) / 1000
+	x = v1 - float32(button)*1000
+	y = v2
+	return
+}
+
 // UnpackSlice is a convenience wrapper for []byte input.
 // Returns false if len(b) < WireLen.
 func UnpackSlice(b []byte) (WireEvent, bool) {

@@ -325,7 +325,6 @@ func (s *Server) wsRecord(ws *websocket.Conn, name string, sessionKey []byte) {
 	stopJitter := jb.Run(5*time.Millisecond, func(ev events.WireEvent) {
 		captured = append(captured, ev)
 	})
-	defer stopJitter()
 
 	for {
 		_, data, err := ws.ReadMessage()
@@ -345,9 +344,12 @@ func (s *Server) wsRecord(ws *websocket.Conn, name string, sessionKey []byte) {
 		jb.Push(ev)
 	}
 
-	time.Sleep(s.cfg.JitterDelay + 10*time.Millisecond)
-	jb.Tick(func(ev events.WireEvent) { captured = append(captured, ev) })
+	// Stop the background jitter goroutine before the final drain.
 	stopJitter()
+	if s.cfg.JitterDelay > 0 {
+		time.Sleep(s.cfg.JitterDelay + 10*time.Millisecond)
+	}
+	jb.Tick(func(ev events.WireEvent) { captured = append(captured, ev) })
 
 	if len(captured) == 0 {
 		return
@@ -362,10 +364,18 @@ func (s *Server) wsRecord(ws *websocket.Conn, name string, sessionKey []byte) {
 	s.sync.Tick()
 }
 
+// heartbeatInterval is how often MsgSync frames are injected between events
+// during a long playback to keep the connection alive and let the client
+// detect dropped connections.
+const heartbeatInterval = 30 * time.Second
+
 // wsPlayback loads an Interaction by id and streams its WireEvents as binary
 // frames at their original relative timing.
 // sessionKey is the per-connection HMAC key supplied by wsAuth (nil when
 // --sign-frames is off).
+//
+// A MsgSync frame (V1 = sequence number) is injected every heartbeatInterval
+// of wall time between events so the client can detect a stale connection.
 func (s *Server) wsPlayback(ws *websocket.Conn, id string, sessionKey []byte) {
 	ia, err := s.store.GetInteraction(id)
 	if err != nil {
@@ -374,21 +384,47 @@ func (s *Server) wsPlayback(ws *websocket.Conn, id string, sessionKey []byte) {
 		return
 	}
 
-	start := time.Now()
-	for _, ev := range ia.Events {
-		target := start.Add(time.Duration(ev.T) * time.Millisecond)
-		if wait := time.Until(target); wait > 0 {
-			time.Sleep(wait)
-		}
+	sendFrame := func(ev events.WireEvent) error {
 		var payload []byte
-		if s.cfg.SignFrames {
+		if s.cfg.SignFrames && sessionKey != nil {
 			af := icrypto.PackSigned(sessionKey, ev)
 			payload = af[:]
 		} else {
 			b := events.Pack(ev)
 			payload = b[:]
 		}
-		if err := ws.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		return ws.WriteMessage(websocket.BinaryMessage, payload)
+	}
+
+	start := time.Now()
+	lastHeartbeat := start
+	var seq uint32
+
+	for _, ev := range ia.Events {
+		target := start.Add(time.Duration(ev.T) * time.Millisecond)
+
+		// Inject heartbeat(s) if the gap to the next event is long.
+		for time.Until(target) > heartbeatInterval {
+			time.Sleep(heartbeatInterval)
+			lastHeartbeat = time.Now()
+			seq++
+			hb := events.WireEvent{
+				Type: events.MsgSync,
+				T:    uint32(time.Since(start).Milliseconds()),
+				V1:   float32(seq),
+			}
+			if err := sendFrame(hb); err != nil {
+				return
+			}
+		}
+
+		// Sleep only if a heartbeat hasn't already consumed the wait.
+		if wait := time.Until(target); wait > 0 {
+			time.Sleep(wait)
+		}
+		_ = lastHeartbeat
+
+		if err := sendFrame(ev); err != nil {
 			return
 		}
 	}

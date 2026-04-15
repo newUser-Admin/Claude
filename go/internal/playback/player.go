@@ -31,7 +31,13 @@ func DefaultAction(ev events.WireEvent) {
 			fmt.Fprintf(os.Stdout, "[0x%02x]", int(ch))
 		}
 	case events.MsgClick:
-		fmt.Fprintf(os.Stdout, "[click x=%.3f y=%.3f]\n", ev.V1, ev.V2)
+		x, y, btn := events.DecodeClick(ev.V1, ev.V2)
+		names := []string{"left", "right", "middle"}
+		btnName := "unknown"
+		if btn < len(names) {
+			btnName = names[btn]
+		}
+		fmt.Fprintf(os.Stdout, "[click %s x=%.3f y=%.3f]\n", btnName, x, y)
 	case events.MsgSync:
 		fmt.Fprintf(os.Stdout, "[sync t=%d]\n", ev.T)
 	case events.MsgScroll:
