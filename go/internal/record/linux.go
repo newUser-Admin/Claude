@@ -1,19 +1,23 @@
 //go:build linux
 
-// Linux evdev backend — reads raw keyboard events from /dev/input/eventX
+// Linux evdev backend — reads raw keyboard AND mouse events from /dev/input/eventX
 // without CGo or elevated privileges (user must be in the 'input' group).
 //
 // Auto-detects the keyboard device; override with INTERACT_INPUT_DEV=<path>.
+// Auto-detects the mouse device;    override with INTERACT_MOUSE_DEV=<path>.
+// Screen resolution for click normalisation: INTERACT_SCREEN=WxH (default 1920x1080).
 package record
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"context"
+	"sync"
+	"sync/atomic"
 
 	"github.com/newuser-admin/claude/interact/pkg/events"
 )
@@ -28,57 +32,174 @@ type inputEvent struct {
 	Value int32
 }
 
+// Linux event-type constants.
 const (
-	evKey     = 0x01 // EV_KEY
-	kvPress   = 1
-	kvRepeat  = 2
+	evKey = 0x01 // EV_KEY
+	evRel = 0x02 // EV_REL
+	evSyn = 0x00 // EV_SYN
+
+	kvPress  = 1
+	kvRepeat = 2
+
+	// EV_REL axis codes
+	relX     = 0x00
+	relY     = 0x01
+	relHWheel = 0x06
+	relWheel = 0x08
+
+	// EV_KEY button codes (mouse)
+	btnLeft   = 0x110 // 272
+	btnRight  = 0x111 // 273
+	btnMiddle = 0x112 // 274
 )
 
 func init() {
 	SetBackend(&EvdevBackend{})
 }
 
-// EvdevBackend captures system-wide keyboard events via Linux evdev.
+// EvdevBackend captures system-wide keyboard and mouse events via Linux evdev.
 type EvdevBackend struct {
 	// Device overrides auto-detection. Empty means auto-detect.
 	Device string
+	// MouseDevice overrides mouse auto-detection. Empty means auto-detect.
+	MouseDevice string
 }
 
 func (b *EvdevBackend) Start(ctx context.Context, ch chan<- events.WireEvent) error {
-	device := b.Device
-	if device == "" {
+	kbd := b.Device
+	if kbd == "" {
 		if d := os.Getenv("INTERACT_INPUT_DEV"); d != "" {
-			device = d
+			kbd = d
 		}
 	}
-	if device == "" {
+	mouse := b.MouseDevice
+	if mouse == "" {
+		if d := os.Getenv("INTERACT_MOUSE_DEV"); d != "" {
+			mouse = d
+		}
+	}
+
+	if kbd == "" {
 		var err error
-		device, err = findKeyboardDevice()
+		kbd, err = findDeviceByCapability(evKey, false /* not mouse */)
 		if err != nil {
 			return err
 		}
 	}
+	if mouse == "" {
+		// Best-effort; mouse capture is optional.
+		mouse, _ = findDeviceByCapability(evKey, true /* mouse */)
+	}
 
-	f, err := os.Open(device)
+	// Parse screen resolution for click normalisation.
+	sw, sh := screenDims()
+
+	f, err := os.Open(kbd)
 	if err != nil {
 		return fmt.Errorf(
 			"open %s: %w\n"+
 				"  hint: sudo usermod -aG input $USER && newgrp input\n"+
 				"  or:   sudo chmod a+r %s",
-			device, err, device,
+			kbd, err, kbd,
 		)
 	}
-	defer f.Close()
 
-	fmt.Fprintf(os.Stderr, "[evdev] capturing from %s\n", device)
+	fmt.Fprintf(os.Stderr, "[evdev] keyboard: %s\n", kbd)
 
-	// Close the file when the context is cancelled to unblock binary.Read.
-	go func() {
-		<-ctx.Done()
-		f.Close()
-	}()
+	var (
+		startMs    int64
+		startOnce  sync.Once
+		startMsVal atomic.Int64
+	)
+	ts := func(sec, usec int64) uint32 {
+		now := sec*1000 + usec/1000
+		startOnce.Do(func() { startMsVal.Store(now) })
+		return uint32(now - startMsVal.Load())
+	}
 
-	var startMs int64
+	// Context close → close both files.
+	go func() { <-ctx.Done(); f.Close() }()
+
+	// Mouse goroutine.
+	if mouse != "" {
+		mf, err := os.Open(mouse)
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "[evdev] mouse:    %s\n", mouse)
+			go func() {
+				defer mf.Close()
+				go func() { <-ctx.Done(); mf.Close() }()
+
+				var (
+					accX, accY int32 // accumulated relative position (pixels)
+				)
+				for {
+					var ie inputEvent
+					if err := binary.Read(mf, binary.LittleEndian, &ie); err != nil {
+						return
+					}
+					t := ts(ie.Sec, ie.Usec)
+					switch ie.Type {
+					case evRel:
+						switch ie.Code {
+						case relX:
+							accX += ie.Value
+						case relY:
+							accY += ie.Value
+						case relWheel:
+							select {
+							case ch <- events.WireEvent{
+								Type: events.MsgScroll,
+								T:    t,
+								V1:   0,
+								V2:   float32(ie.Value),
+							}:
+							default:
+							}
+						case relHWheel:
+							select {
+							case ch <- events.WireEvent{
+								Type: events.MsgScroll,
+								T:    t,
+								V1:   float32(ie.Value),
+								V2:   0,
+							}:
+							default:
+							}
+						}
+					case evKey:
+						if ie.Value != kvPress {
+							continue
+						}
+						var btn float32
+						switch ie.Code {
+						case btnLeft:
+							btn = 0
+						case btnRight:
+							btn = 1
+						case btnMiddle:
+							btn = 2
+						default:
+							continue
+						}
+						xFrac := clamp01(float32(accX) / float32(sw))
+						yFrac := clamp01(float32(accY) / float32(sh))
+						select {
+						case ch <- events.WireEvent{
+							Type: events.MsgClick,
+							T:    t,
+							V1:   xFrac + btn*1000, // encode button index above 1.0
+							V2:   yFrac,
+						}:
+						default:
+						}
+					}
+				}
+			}()
+		}
+	}
+	_ = startMs // keep var alive (used via closure)
+
+	// Keyboard read loop (blocking).
 	for {
 		var ie inputEvent
 		if err := binary.Read(f, binary.LittleEndian, &ie); err != nil {
@@ -89,31 +210,82 @@ func (b *EvdevBackend) Start(ctx context.Context, ch chan<- events.WireEvent) er
 				return fmt.Errorf("evdev read: %w", err)
 			}
 		}
-
-		// Only key-press and key-repeat events.
 		if ie.Type != evKey || (ie.Value != kvPress && ie.Value != kvRepeat) {
 			continue
 		}
-
-		nowMs := ie.Sec*1000 + ie.Usec/1000
-		if startMs == 0 {
-			startMs = nowMs
-		}
-
+		t := ts(ie.Sec, ie.Usec)
 		ch <- events.WireEvent{
 			Type: events.MsgKey,
-			T:    uint32(nowMs - startMs),
+			T:    t,
 			V1:   float32(evdevToChar(ie.Code)),
 		}
 	}
 }
 
+func clamp01(v float32) float32 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// ─── Screen dimensions ────────────────────────────────────────────────────────
+
+func screenDims() (w, h int) {
+	if s := os.Getenv("INTERACT_SCREEN"); s != "" {
+		parts := strings.SplitN(s, "x", 2)
+		if len(parts) == 2 {
+			if pw, err := strconv.Atoi(parts[0]); err == nil {
+				if ph, err := strconv.Atoi(parts[1]); err == nil {
+					return pw, ph
+				}
+			}
+		}
+	}
+	// Try to read from /sys/class/drm (best-effort).
+	if dw, dh, ok := sysdrm(); ok {
+		return dw, dh
+	}
+	return 1920, 1080
+}
+
+func sysdrm() (w, h int, ok bool) {
+	matches, _ := filepath.Glob("/sys/class/drm/*/modes")
+	for _, m := range matches {
+		data, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		first := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)[0]
+		// format: "1920x1080"
+		parts := strings.SplitN(first, "x", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if pw, err := strconv.Atoi(parts[0]); err == nil {
+			if ph, err := strconv.Atoi(parts[1]); err == nil {
+				return pw, ph, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
 // ─── Device discovery ─────────────────────────────────────────────────────────
 
-func findKeyboardDevice() (string, error) {
-	// 1. Look for by-path / by-id symlinks ending in "-kbd".
+// findDeviceByCapability returns a keyboard device (wantMouse=false) or a
+// pointer/mouse device (wantMouse=true) by scanning /dev/input/by-{path,id}
+// and falling back to /proc/bus/input/devices.
+func findDeviceByCapability(capBit uint16, wantMouse bool) (string, error) {
+	suffix := "-kbd"
+	if wantMouse {
+		suffix = "-mouse"
+	}
 	for _, base := range []string{"/dev/input/by-path", "/dev/input/by-id"} {
-		matches, _ := filepath.Glob(base + "/*-kbd")
+		matches, _ := filepath.Glob(base + "/*" + suffix)
 		for _, m := range matches {
 			if target, err := filepath.EvalSymlinks(m); err == nil {
 				return target, nil
@@ -121,37 +293,50 @@ func findKeyboardDevice() (string, error) {
 		}
 	}
 
-	// 2. Parse /proc/bus/input/devices for devices with EV_KEY capability.
-	if dev, err := scanProcInputDevices(); err == nil && dev != "" {
+	// Fallback: parse /proc/bus/input/devices.
+	if wantMouse {
+		dev, err := scanForMouse()
+		if err == nil && dev != "" {
+			return dev, nil
+		}
+		return "", fmt.Errorf("no mouse device found; set INTERACT_MOUSE_DEV=/dev/input/eventN")
+	}
+	dev, err := scanProcInputDevices()
+	if err == nil && dev != "" {
 		return dev, nil
 	}
-
-	return "", fmt.Errorf(
-		"no keyboard device found; set INTERACT_INPUT_DEV=/dev/input/eventN",
-	)
+	return "", fmt.Errorf("no keyboard device found; set INTERACT_INPUT_DEV=/dev/input/eventN")
 }
 
-// scanProcInputDevices returns the first /dev/input/eventN that has the EV_KEY
-// (0x01) event-type bit set — i.e. it can produce key events.
+// scanProcInputDevices returns the first /dev/input/eventN that has EV_KEY
+// (bit 1) set and is not a mouse (no REL axis / BTN_MOUSE).
 func scanProcInputDevices() (string, error) {
+	return parseProcDevices(false)
+}
+
+func scanForMouse() (string, error) {
+	return parseProcDevices(true)
+}
+
+func parseProcDevices(wantMouse bool) (string, error) {
 	data, err := os.ReadFile("/proc/bus/input/devices")
 	if err != nil {
 		return "", err
 	}
 
-	type devInfo struct {
+	type entry struct {
 		hasKey   bool
+		hasRel   bool // EV_REL — relative axes (typical of mice)
 		handlers []string
 	}
 
-	var cur devInfo
-	var all []devInfo
-
+	var cur entry
+	var all []entry
 	flush := func() {
-		if cur.hasKey && len(cur.handlers) > 0 {
+		if len(cur.handlers) > 0 {
 			all = append(all, cur)
 		}
-		cur = devInfo{}
+		cur = entry{}
 	}
 
 	for _, raw := range strings.Split(string(data), "\n") {
@@ -159,13 +344,11 @@ func scanProcInputDevices() (string, error) {
 		switch {
 		case line == "":
 			flush()
-
 		case strings.HasPrefix(line, "B: EV="):
-			hexStr := strings.TrimPrefix(line, "B: EV=")
-			if v, err := strconv.ParseUint(hexStr, 16, 64); err == nil {
-				cur.hasKey = v&(1<<1) != 0 // EV_KEY is bit 1
+			if v, err := strconv.ParseUint(strings.TrimPrefix(line, "B: EV="), 16, 64); err == nil {
+				cur.hasKey = v&(1<<1) != 0
+				cur.hasRel = v&(1<<2) != 0
 			}
-
 		case strings.HasPrefix(line, "H: Handlers="):
 			for _, tok := range strings.Fields(strings.TrimPrefix(line, "H: Handlers=")) {
 				if strings.HasPrefix(tok, "event") {
@@ -176,18 +359,19 @@ func scanProcInputDevices() (string, error) {
 	}
 	flush()
 
-	// Prefer the device with the most key capabilities (typically the keyboard
-	// rather than a mouse or joystick that also has a few key codes).
-	if len(all) > 0 {
-		return all[0].handlers[0], nil
+	for _, e := range all {
+		if wantMouse && e.hasKey && e.hasRel {
+			return e.handlers[0], nil
+		}
+		if !wantMouse && e.hasKey && !e.hasRel {
+			return e.handlers[0], nil
+		}
 	}
 	return "", nil
 }
 
 // ─── Keycode → character mapping (US QWERTY, unshifted) ──────────────────────
 
-// evdevToChar converts a Linux evdev key code to its representative rune.
-// Unmapped codes are returned as-is so they round-trip without loss.
 func evdevToChar(code uint16) rune {
 	if int(code) < len(evdevMap) {
 		if r := evdevMap[code]; r != 0 {
@@ -198,7 +382,6 @@ func evdevToChar(code uint16) rune {
 }
 
 // evdevMap is indexed by evdev key code (0–127).
-// Values are the unshifted US-QWERTY characters.
 var evdevMap = [128]rune{
 	// 0-13
 	0, 0x1b, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=',

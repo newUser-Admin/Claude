@@ -1,12 +1,12 @@
 //go:build darwin
 
-// macOS system-wide keyboard capture via CGEventTap (CoreGraphics).
+// macOS system-wide keyboard, mouse-click and scroll capture via CGEventTap.
 //
 // Prerequisites:
 //   - Grant "Accessibility" permission to the binary in
 //     System Preferences → Privacy & Security → Accessibility.
 //   - If permission is missing CGEventTapCreate returns nil and an
-//     informative error is returned.
+//     informative error is returned to the caller.
 package record
 
 // #cgo LDFLAGS: -framework ApplicationServices -framework CoreFoundation
@@ -14,20 +14,25 @@ package record
 // #include <ApplicationServices/ApplicationServices.h>
 // #include <stdlib.h>
 //
-// // Forward declaration of the Go callback defined below.
-// extern CGEventRef goKeyCallback(CGEventTapProxy, CGEventType, CGEventRef, void*);
+// // Forward declaration of the Go callback.
+// extern CGEventRef goEventCallback(CGEventTapProxy, CGEventType, CGEventRef, void*);
 //
-// // startTap creates a session-level event tap for key-down events and starts
-// // running the run-loop source.  Returns NULL on failure (no Accessibility perms).
+// // startTap creates a session-level event tap for key-down, left/right mouse-down
+// // and scroll-wheel events, then adds it to the current CFRunLoop.
 // static CFMachPortRef startTap(void) {
-//     CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) |
-//                        CGEventMaskBit(kCGEventKeyUp);
+//     CGEventMask mask =
+//         CGEventMaskBit(kCGEventKeyDown)          |
+//         CGEventMaskBit(kCGEventLeftMouseDown)    |
+//         CGEventMaskBit(kCGEventRightMouseDown)   |
+//         CGEventMaskBit(kCGEventOtherMouseDown)   |
+//         CGEventMaskBit(kCGEventScrollWheel);
+//
 //     CFMachPortRef tap = CGEventTapCreate(
 //         kCGSessionEventTap,
 //         kCGHeadInsertEventTap,
 //         kCGEventTapOptionListenOnly,
 //         mask,
-//         goKeyCallback,
+//         goEventCallback,
 //         NULL);
 //     if (tap == NULL) return NULL;
 //
@@ -43,9 +48,16 @@ package record
 //     CFRelease(tap);
 // }
 //
+// // Pump the run loop for up to 50 ms.
 // static void runLoopRunShort(void) {
-//     // Pump the run loop for up to 50 ms, then return so Go can check ctx.
 //     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+// }
+//
+// // Screen dimensions for normalising click coordinates.
+// static void screenSize(CGFloat *w, CGFloat *h) {
+//     CGDirectDisplayID d = CGMainDisplayID();
+//     *w = (CGFloat)CGDisplayPixelsWide(d);
+//     *h = (CGFloat)CGDisplayPixelsHigh(d);
 // }
 import "C"
 
@@ -61,29 +73,25 @@ import (
 )
 
 // tapState holds the channel for the currently active tap.
-// CGEventTap callbacks are C-level so we use a global to reach Go state.
 var tapState struct {
 	mu      sync.Mutex
 	ch      chan<- events.WireEvent
 	startMs int64
+	sw, sh  float64 // screen dimensions
 }
 
-//export goKeyCallback
-func goKeyCallback(proxy C.CGEventTapProxy, typ C.CGEventType, event C.CGEventRef, _ unsafe.Pointer) C.CGEventRef {
+//export goEventCallback
+func goEventCallback(_ C.CGEventTapProxy, typ C.CGEventType, event C.CGEventRef, _ unsafe.Pointer) C.CGEventRef {
 	tapState.mu.Lock()
 	ch := tapState.ch
 	start := tapState.startMs
+	sw := tapState.sw
+	sh := tapState.sh
 	tapState.mu.Unlock()
 
 	if ch == nil {
 		return event
 	}
-
-	if typ != C.kCGEventKeyDown {
-		return event
-	}
-
-	keyCode := C.CGEventGetIntegerValueField(event, C.kCGKeyboardEventKeycode)
 
 	nowMs := time.Now().UnixMilli()
 	if start == 0 {
@@ -92,15 +100,64 @@ func goKeyCallback(proxy C.CGEventTapProxy, typ C.CGEventType, event C.CGEventRe
 		tapState.mu.Unlock()
 		start = nowMs
 	}
+	t := uint32(nowMs - start)
 
-	select {
-	case ch <- events.WireEvent{
-		Type: events.MsgKey,
-		T:    uint32(nowMs - start),
-		V1:   float32(macKeyToChar(uint16(keyCode))),
-	}:
-	default:
+	switch typ {
+	case C.kCGEventKeyDown:
+		keyCode := C.CGEventGetIntegerValueField(event, C.kCGKeyboardEventKeycode)
+		select {
+		case ch <- events.WireEvent{
+			Type: events.MsgKey,
+			T:    t,
+			V1:   float32(macKeyToChar(uint16(keyCode))),
+		}:
+		default:
+		}
+
+	case C.kCGEventLeftMouseDown, C.kCGEventRightMouseDown, C.kCGEventOtherMouseDown:
+		var btn float32
+		switch typ {
+		case C.kCGEventLeftMouseDown:
+			btn = 0
+		case C.kCGEventRightMouseDown:
+			btn = 1
+		default:
+			btn = 2
+		}
+		loc := C.CGEventGetLocation(event)
+		var xFrac, yFrac float32
+		if sw > 0 && sh > 0 {
+			xFrac = float32(float64(loc.x) / sw)
+			yFrac = float32(float64(loc.y) / sh)
+		}
+		// Encode button index above the 0-1 fraction range (same convention as Linux).
+		select {
+		case ch <- events.WireEvent{
+			Type: events.MsgClick,
+			T:    t,
+			V1:   xFrac + btn*1000,
+			V2:   yFrac,
+		}:
+		default:
+		}
+
+	case C.kCGEventScrollWheel:
+		dx := C.CGEventGetIntegerValueField(event, C.kCGScrollWheelEventDeltaAxis2)
+		dy := C.CGEventGetIntegerValueField(event, C.kCGScrollWheelEventDeltaAxis1)
+		if dx == 0 && dy == 0 {
+			break
+		}
+		select {
+		case ch <- events.WireEvent{
+			Type: events.MsgScroll,
+			T:    t,
+			V1:   float32(dx),
+			V2:   float32(dy),
+		}:
+		default:
+		}
 	}
+
 	return event
 }
 
@@ -108,7 +165,7 @@ func init() {
 	SetBackend(&CGEventBackend{})
 }
 
-// CGEventBackend captures system-wide keyboard events using CGEventTap.
+// CGEventBackend captures system-wide events using CGEventTap.
 type CGEventBackend struct{}
 
 func (b *CGEventBackend) Start(ctx context.Context, ch chan<- events.WireEvent) error {
@@ -121,9 +178,14 @@ func (b *CGEventBackend) Start(ctx context.Context, ch chan<- events.WireEvent) 
 	}
 	defer C.stopTap(tap)
 
+	var sw, sh C.CGFloat
+	C.screenSize(&sw, &sh)
+
 	tapState.mu.Lock()
 	tapState.ch = ch
 	tapState.startMs = 0
+	tapState.sw = float64(sw)
+	tapState.sh = float64(sh)
 	tapState.mu.Unlock()
 
 	defer func() {
@@ -132,7 +194,7 @@ func (b *CGEventBackend) Start(ctx context.Context, ch chan<- events.WireEvent) 
 		tapState.mu.Unlock()
 	}()
 
-	fmt.Fprintln(os.Stderr, "[cgeventtap] capturing system-wide keyboard events")
+	fmt.Fprintf(os.Stderr, "[cgeventtap] capturing keyboard+mouse (%.0fx%.0f)\n", float64(sw), float64(sh))
 
 	for {
 		select {

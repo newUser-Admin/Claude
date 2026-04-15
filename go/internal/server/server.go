@@ -81,16 +81,16 @@ func New(cfg Config, st *store.Store) *Server {
 	s.mux.HandleFunc("/api/payloads", s.auth(s.handlePayloads))
 	s.mux.HandleFunc("/api/payloads/", s.auth(s.handlePayload))
 	s.mux.HandleFunc("/ws/interact", func(w http.ResponseWriter, r *http.Request) {
-		s.wsAuth(w, r, func(ws *websocket.Conn) { s.serveWSInteract(ws, r) })
+		s.wsAuth(w, r, func(ws *websocket.Conn, key []byte) { s.serveWSInteract(ws, r, key) })
 	})
 	s.mux.HandleFunc("/ws/shell", func(w http.ResponseWriter, r *http.Request) {
-		s.wsAuth(w, r, func(ws *websocket.Conn) {
+		s.wsAuth(w, r, func(ws *websocket.Conn, _ []byte) {
 			fmt.Printf("[shell] client connected: %s\n", r.RemoteAddr)
 			shellpty.Handler(ws, r.RemoteAddr)
 		})
 	})
 	s.mux.HandleFunc("/ws/sync", func(w http.ResponseWriter, r *http.Request) {
-		s.wsAuth(w, r, func(ws *websocket.Conn) { s.serveWSSync(ws, r) })
+		s.wsAuth(w, r, func(ws *websocket.Conn, _ []byte) { s.serveWSSync(ws, r) })
 	})
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -291,7 +291,9 @@ func (s *Server) handlePayload(w http.ResponseWriter, r *http.Request) {
 // WebSocket: /ws/interact  (binary — WireEvent recording / playback)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (s *Server) serveWSInteract(ws *websocket.Conn, r *http.Request) {
+// serveWSInteract is the entry-point for /ws/interact.
+// sessionKey is the per-connection HMAC key (nil when --sign-frames is off).
+func (s *Server) serveWSInteract(ws *websocket.Conn, r *http.Request, sessionKey []byte) {
 	remote := r.RemoteAddr
 	fmt.Printf("[interact] client connected: %s\n", remote)
 	defer fmt.Printf("[interact] client disconnected: %s\n", remote)
@@ -302,25 +304,19 @@ func (s *Server) serveWSInteract(ws *websocket.Conn, r *http.Request) {
 
 	switch mode {
 	case "play":
-		s.wsPlayback(ws, id)
+		s.wsPlayback(ws, id, sessionKey)
 	default:
-		s.wsRecord(ws, name)
+		s.wsRecord(ws, name, sessionKey)
 	}
 }
 
 // wsRecord receives binary WireEvent frames from the client, buffers them
 // through the jitter filter, and persists a named Interaction on close.
-// When cfg.SignFrames is true each frame must be 45 bytes (13-byte body +
-// 32-byte HMAC-SHA256); invalid MACs are silently dropped.
-func (s *Server) wsRecord(ws *websocket.Conn, name string) {
+// sessionKey is the per-connection HMAC key supplied by wsAuth (nil when
+// --sign-frames is off); invalid MACs are silently dropped.
+func (s *Server) wsRecord(ws *websocket.Conn, name string, sessionKey []byte) {
 	if name == "" {
 		name = fmt.Sprintf("recording-%s", time.Now().Format("20060102-150405"))
-	}
-
-	var sessionKey []byte
-	if s.cfg.SignFrames {
-		// Derive a stable key from token; in production pair with per-session salt.
-		sessionKey = icrypto.DeriveKey([]byte(s.cfg.Token), make([]byte, icrypto.SaltLen))
 	}
 
 	jb := jitter.New(s.cfg.JitterDelay)
@@ -368,18 +364,14 @@ func (s *Server) wsRecord(ws *websocket.Conn, name string) {
 
 // wsPlayback loads an Interaction by id and streams its WireEvents as binary
 // frames at their original relative timing.
-// When cfg.SignFrames is true each frame is sent as a 45-byte authenticated frame.
-func (s *Server) wsPlayback(ws *websocket.Conn, id string) {
+// sessionKey is the per-connection HMAC key supplied by wsAuth (nil when
+// --sign-frames is off).
+func (s *Server) wsPlayback(ws *websocket.Conn, id string, sessionKey []byte) {
 	ia, err := s.store.GetInteraction(id)
 	if err != nil {
 		ws.WriteMessage(websocket.CloseMessage, //nolint:errcheck
 			websocket.FormatCloseMessage(4004, "interaction not found"))
 		return
-	}
-
-	var sessionKey []byte
-	if s.cfg.SignFrames {
-		sessionKey = icrypto.DeriveKey([]byte(s.cfg.Token), make([]byte, icrypto.SaltLen))
 	}
 
 	start := time.Now()
