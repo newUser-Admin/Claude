@@ -6,13 +6,16 @@
 //
 // Flags:
 //
-//	--addr    bind address (default :8080)
-//	--db      BoltDB database path (default interact.db)
-//	--token   shared secret (default: changeme — CHANGE THIS)
-//	--tls-cert  TLS certificate file (enables HTTPS/WSS when set)
-//	--tls-key   TLS private key file
-//	--node-id   stable node identity (default: hostname)
-//	--jitter    jitter buffer delay in ms (default 100)
+//	--addr             bind address (default :8080)
+//	--db               BoltDB database path (default interact.db)
+//	--token            shared secret (CHANGE THIS in production)
+//	--tls-cert         TLS certificate file (enables HTTPS/WSS when set)
+//	--tls-key          TLS private key file
+//	--node-id          stable node identity (default: hostname)
+//	--jitter           jitter buffer delay in ms (default 100)
+//	--auth-challenge   use challenge-response on WS instead of token-in-URL
+//	--sign-frames      HMAC-sign binary wire frames (45 bytes instead of 13)
+//	--encrypt-payloads AES-256-GCM encrypt payload data at rest
 package main
 
 import (
@@ -38,13 +41,16 @@ func main() {
 
 func rootCmd() *cobra.Command {
 	var (
-		addr    string
-		dbPath  string
-		token   string
-		tlsCert string
-		tlsKey  string
-		nodeID  string
-		jitterMs int
+		addr            string
+		dbPath          string
+		token           string
+		tlsCert         string
+		tlsKey          string
+		nodeID          string
+		jitterMs        int
+		challengeAuth   bool
+		signFrames      bool
+		encryptPayloads bool
 	)
 
 	cmd := &cobra.Command{
@@ -52,7 +58,7 @@ func rootCmd() *cobra.Command {
 		Short: "interact server — WebSocket interaction relay + shell + sync",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if token == "changeme" {
-				fmt.Fprintln(os.Stderr, "[WARN] using default token 'changeme' — set --token in production")
+				fmt.Fprintln(os.Stderr, "[WARN] token is 'changeme' — set --token to a strong secret in production")
 			}
 
 			if nodeID == "" {
@@ -66,21 +72,24 @@ func rootCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			srv := server.New(server.Config{
-				Token:       token,
-				JitterDelay: time.Duration(jitterMs) * time.Millisecond,
-				NodeID:      nodeID,
-			}, st)
+			cfg := server.Config{
+				Token:           token,
+				JitterDelay:     time.Duration(jitterMs) * time.Millisecond,
+				NodeID:          nodeID,
+				ChallengeAuth:   challengeAuth,
+				SignFrames:      signFrames,
+				EncryptPayloads: encryptPayloads,
+			}
+			srv := server.New(cfg, st)
 
 			httpSrv := &http.Server{
 				Addr:         addr,
 				Handler:      srv,
 				ReadTimeout:  30 * time.Second,
-				WriteTimeout: 0, // WebSocket connections are long-lived
+				WriteTimeout: 0, // long-lived WebSocket connections
 				IdleTimeout:  120 * time.Second,
 			}
 
-			// Graceful shutdown on SIGINT / SIGTERM.
 			quit := make(chan os.Signal, 1)
 			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 			go func() {
@@ -94,12 +103,15 @@ func rootCmd() *cobra.Command {
 				proto = "wss"
 			}
 			fmt.Printf("[interactd] listening on %s://%s  node=%s\n", proto, addr, nodeID)
+			fmt.Printf("[interactd] auth=challenge:%v  sign-frames:%v  encrypt-payloads:%v\n",
+				challengeAuth, signFrames, encryptPayloads)
 			fmt.Printf("[interactd] endpoints:\n")
 			fmt.Printf("  REST  %s/api/interactions\n", addr)
 			fmt.Printf("  REST  %s/api/payloads\n", addr)
-			fmt.Printf("  WS    %s/ws/interact?token=...\n", addr)
-			fmt.Printf("  WS    %s/ws/shell?token=...   (shell-client.html compatible)\n", addr)
-			fmt.Printf("  WS    %s/ws/sync?token=...\n", addr)
+			fmt.Printf("  WS    %s/ws/interact   (binary interaction relay)\n", addr)
+			fmt.Printf("  WS    %s/ws/shell      (PTY — shell-client.html compatible)\n", addr)
+			fmt.Printf("  WS    %s/ws/sync       (vector-clock sync)\n", addr)
+			fmt.Printf("  GET   %s/health\n", addr)
 
 			if tlsCert != "" && tlsKey != "" {
 				return httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
@@ -111,10 +123,16 @@ func rootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&addr, "addr", ":8080", "bind address")
 	cmd.Flags().StringVar(&dbPath, "db", "interact.db", "BoltDB database path")
 	cmd.Flags().StringVar(&token, "token", "changeme", "shared secret token")
-	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate file (enables HTTPS)")
-	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS key file")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate file (enables HTTPS/WSS)")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS private key file")
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "stable node identity (default: hostname)")
 	cmd.Flags().IntVar(&jitterMs, "jitter", 100, "jitter buffer delay in milliseconds")
+	cmd.Flags().BoolVar(&challengeAuth, "auth-challenge", false,
+		"use PBKDF2+HMAC challenge-response on WebSocket instead of token-in-URL")
+	cmd.Flags().BoolVar(&signFrames, "sign-frames", false,
+		"HMAC-SHA256-sign binary wire frames (increases frame size 13→45 bytes)")
+	cmd.Flags().BoolVar(&encryptPayloads, "encrypt-payloads", false,
+		"AES-256-GCM encrypt payload Data before storing")
 
 	return cmd
 }
