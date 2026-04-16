@@ -39,6 +39,7 @@ import (
 
 	"github.com/newuser-admin/claude/interact/internal/playback"
 	"github.com/newuser-admin/claude/interact/internal/record"
+	"github.com/newuser-admin/claude/interact/internal/store"
 	isync "github.com/newuser-admin/claude/interact/internal/sync"
 	"github.com/newuser-admin/claude/interact/pkg/client"
 	"github.com/newuser-admin/claude/interact/pkg/events"
@@ -194,29 +195,41 @@ func cmdPlay() *cobra.Command {
 			}
 			defer conn.Close()
 
-			fmt.Fprintf(os.Stderr, "[interact] playing %s at %.1fx speed\n", id, speed)
+			fmt.Fprintf(os.Stderr, "[interact] playing %s at %.1fx speed (streaming)\n", id, speed)
 
-			player := playback.New(nil)
-			player.Speed = speed
-
-			var evs []events.WireEvent
+			action := playback.DefaultAction
+			received := 0
+			// Stream-and-play: the server already paces events at their original
+			// timing, so we dispatch each event immediately on arrival instead of
+			// buffering the whole interaction first.
 			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+				}
 				ev, err := conn.Recv()
 				if err != nil {
 					break
 				}
-				evs = append(evs, ev)
+				// MsgSync frames are heartbeats — skip them.
+				if ev.Type == events.MsgSync {
+					continue
+				}
+				received++
+				action(ev)
 			}
 
-			if len(evs) == 0 {
+			if received == 0 {
 				fmt.Fprintln(os.Stderr, "[interact] no events received")
-				return nil
 			}
-
-			return player.PlaySync(ctx, evs)
+			return nil
 		},
 	}
-	cmd.Flags().Float64Var(&speed, "speed", 1.0, "playback speed multiplier")
+	// --speed is reserved for future local-replay mode (--local flag); in the
+	// current streaming mode the server controls pacing.
+	cmd.Flags().Float64Var(&speed, "speed", 1.0, "playback speed multiplier (future: local replay)")
+	_ = speed // not yet used in streaming mode
 	return cmd
 }
 
@@ -346,6 +359,18 @@ func cmdSync() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
+			// Open local store if --db is set.
+			var localStore *store.Store
+			if dbPath != "" {
+				var err error
+				localStore, err = store.Open(dbPath)
+				if err != nil {
+					return fmt.Errorf("open local db %s: %w", dbPath, err)
+				}
+				defer localStore.Close()
+				fmt.Fprintf(os.Stderr, "[sync] persisting to %s\n", dbPath)
+			}
+
 			conn, err := dialWS(ctx, wsPath("/ws/sync"))
 			if err != nil {
 				return fmt.Errorf("connect: %w", err)
@@ -353,7 +378,7 @@ func cmdSync() *cobra.Command {
 			defer conn.Close()
 			ws := conn.RawConn()
 
-			eng := isync.New("", nil)
+			eng := isync.New("", localStore)
 			fmt.Fprintln(os.Stderr, "[sync] session started")
 
 			_, raw, err := ws.ReadMessage()
@@ -374,7 +399,7 @@ func cmdSync() *cobra.Command {
 				return err
 			}
 
-			ops := 0
+			upserts, deletes := 0, 0
 			for {
 				_, raw, err := ws.ReadMessage()
 				if err != nil {
@@ -387,20 +412,28 @@ func cmdSync() *cobra.Command {
 				if err != nil {
 					continue
 				}
-				ops++
 				switch op.Op {
 				case "upsert":
 					if op.Interaction != nil {
+						upserts++
 						fmt.Printf("[sync] + %s  %q  (%d events)\n",
 							op.Interaction.ID, op.Interaction.Name, len(op.Interaction.Events))
-						_ = dbPath // TODO: persist when --db is set
+						if localStore != nil {
+							if err := localStore.SaveInteraction(op.Interaction); err != nil {
+								fmt.Fprintf(os.Stderr, "[sync] save error: %v\n", err)
+							}
+						}
 					}
 				case "delete":
+					deletes++
 					fmt.Printf("[sync] - %s\n", op.DeleteID)
+					if localStore != nil {
+						localStore.DeleteInteraction(op.DeleteID) //nolint:errcheck
+					}
 				}
 			}
 			ws.WriteMessage(websocket.TextMessage, []byte("{}")) //nolint:errcheck
-			fmt.Fprintf(os.Stderr, "[sync] done — %d ops received\n", ops)
+			fmt.Fprintf(os.Stderr, "[sync] done — %d upserts, %d deletes\n", upserts, deletes)
 			return nil
 		},
 	}

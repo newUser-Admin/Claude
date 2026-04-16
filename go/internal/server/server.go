@@ -26,11 +26,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -45,12 +47,17 @@ import (
 
 // Config holds server-wide settings.
 type Config struct {
-	Token         string        // shared secret for auth
-	JitterDelay   time.Duration // jitter buffer window for /ws/interact (default 100ms)
-	NodeID        string        // this server's sync identity
-	ChallengeAuth bool          // use challenge-response on WS instead of token-in-URL
-	SignFrames    bool          // HMAC-sign binary wire frames (45 bytes instead of 13)
-	EncryptPayloads bool        // AES-256-GCM encrypt payload data at rest
+	Token           string        // shared secret for auth
+	JitterDelay     time.Duration // jitter buffer window for /ws/interact (default 100ms)
+	NodeID          string        // this server's sync identity
+	ChallengeAuth   bool          // use challenge-response on WS instead of token-in-URL
+	SignFrames      bool          // HMAC-sign binary wire frames (45 bytes instead of 13)
+	EncryptPayloads bool          // AES-256-GCM encrypt payload data at rest
+	// RateLimit is the sustained per-IP request rate (requests/second).
+	// 0 means unlimited.
+	RateLimit float64
+	// RateBurst is the per-IP burst allowance.  Defaults to max(1, RateLimit*3).
+	RateBurst int
 }
 
 // Server is the main HTTP + WebSocket handler.
@@ -60,6 +67,15 @@ type Server struct {
 	sync     *isync.Engine
 	upgrader websocket.Upgrader
 	mux      *http.ServeMux
+
+	// Graceful shutdown: wsWg tracks active WS handler goroutines;
+	// shutCtx is cancelled when Shutdown is called.
+	wsWg    sync.WaitGroup
+	shutCtx context.Context
+	shutFn  context.CancelFunc
+
+	// Rate limiter (initialised in New).
+	limiter *ipLimiter
 }
 
 // New wires up all handlers and returns a ready Server.
@@ -67,6 +83,7 @@ func New(cfg Config, st *store.Store) *Server {
 	if cfg.JitterDelay == 0 {
 		cfg.JitterDelay = 100 * time.Millisecond
 	}
+	shutCtx, shutFn := context.WithCancel(context.Background())
 	s := &Server{
 		cfg:   cfg,
 		store: st,
@@ -74,12 +91,17 @@ func New(cfg Config, st *store.Store) *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+		shutCtx: shutCtx,
+		shutFn:  shutFn,
+		limiter: newIPLimiter(cfg.RateLimit, cfg.RateBurst),
 	}
 	s.mux = http.NewServeMux()
-	s.mux.HandleFunc("/api/interactions", s.auth(s.handleInteractions))
-	s.mux.HandleFunc("/api/interactions/", s.auth(s.handleInteraction))
-	s.mux.HandleFunc("/api/payloads", s.auth(s.handlePayloads))
-	s.mux.HandleFunc("/api/payloads/", s.auth(s.handlePayload))
+	// All routes wrapped with the rate limiter.
+	rl := s.limitMiddleware
+	s.mux.Handle("/api/interactions", rl(s.auth(s.handleInteractions)))
+	s.mux.Handle("/api/interactions/", rl(s.auth(s.handleInteraction)))
+	s.mux.Handle("/api/payloads", rl(s.auth(s.handlePayloads)))
+	s.mux.Handle("/api/payloads/", rl(s.auth(s.handlePayload)))
 	s.mux.HandleFunc("/ws/interact", func(w http.ResponseWriter, r *http.Request) {
 		s.wsAuth(w, r, func(ws *websocket.Conn, key []byte) { s.serveWSInteract(ws, r, key) })
 	})
@@ -97,6 +119,21 @@ func New(cfg Config, st *store.Store) *Server {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "node": cfg.NodeID})
 	})
 	return s
+}
+
+// Shutdown signals all active WebSocket handlers to wrap up and waits for them
+// to finish.  ctx caps the drain wait; callers should also call
+// http.Server.Shutdown to stop accepting new connections.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutFn() // signal handlers to exit their read loops
+	done := make(chan struct{})
+	go func() { s.wsWg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ServeHTTP implements http.Handler so the server can be passed directly to
@@ -326,11 +363,24 @@ func (s *Server) wsRecord(ws *websocket.Conn, name string, sessionKey []byte) {
 		captured = append(captured, ev)
 	})
 
+	// Set a read deadline so we can check for shutdown periodically.
+	const readPoll = 2 * time.Second
 	for {
+		select {
+		case <-s.shutCtx.Done():
+			goto drain
+		default:
+		}
+		ws.SetReadDeadline(time.Now().Add(readPoll)) //nolint:errcheck
 		_, data, err := ws.ReadMessage()
 		if err != nil {
+			// A timeout just means no data arrived; check shutdown and retry.
+			if isTimeout(err) {
+				continue
+			}
 			break
 		}
+		ws.SetReadDeadline(time.Time{}) //nolint:errcheck // clear deadline after success
 		var ev events.WireEvent
 		var ok bool
 		if s.cfg.SignFrames {
@@ -344,6 +394,7 @@ func (s *Server) wsRecord(ws *websocket.Conn, name string, sessionKey []byte) {
 		jb.Push(ev)
 	}
 
+drain:
 	// Stop the background jitter goroutine before the final drain.
 	stopJitter()
 	if s.cfg.JitterDelay > 0 {
@@ -520,4 +571,33 @@ func jsonBody(r *http.Request, v interface{}) error {
 		return err
 	}
 	return json.Unmarshal(data, v)
+}
+
+// isTimeout returns true if err is a network timeout (e.g. from SetReadDeadline).
+func isTimeout(err error) bool {
+	type timeouter interface{ Timeout() bool }
+	if te, ok := err.(timeouter); ok {
+		return te.Timeout()
+	}
+	return false
+}
+
+// limitMiddleware wraps a handler with the per-IP rate limiter.
+func (s *Server) limitMiddleware(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.limiter != nil && !s.limiter.allow(extractIP(r)) {
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
+		next(w, r)
+	})
+}
+
+// extractIP strips the port from r.RemoteAddr.
+func extractIP(r *http.Request) string {
+	ip := r.RemoteAddr
+	if i := strings.LastIndex(ip, ":"); i != -1 {
+		ip = ip[:i]
+	}
+	return ip
 }

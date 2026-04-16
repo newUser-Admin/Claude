@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -51,6 +52,9 @@ func rootCmd() *cobra.Command {
 		challengeAuth   bool
 		signFrames      bool
 		encryptPayloads bool
+		rateLimit       float64
+		rateBurst       int
+		shutdownTimeout int
 	)
 
 	cmd := &cobra.Command{
@@ -79,6 +83,8 @@ func rootCmd() *cobra.Command {
 				ChallengeAuth:   challengeAuth,
 				SignFrames:      signFrames,
 				EncryptPayloads: encryptPayloads,
+				RateLimit:       rateLimit,
+				RateBurst:       rateBurst,
 			}
 			srv := server.New(cfg, st)
 
@@ -95,7 +101,17 @@ func rootCmd() *cobra.Command {
 			go func() {
 				<-quit
 				fmt.Println("\n[interactd] shutting down…")
-				httpSrv.Close()
+
+				// 1. Stop accepting new connections.
+				drainCtx, cancel := context.WithTimeout(
+					context.Background(),
+					time.Duration(shutdownTimeout)*time.Second,
+				)
+				defer cancel()
+				httpSrv.Shutdown(drainCtx) //nolint:errcheck
+
+				// 2. Drain active WebSocket handlers.
+				srv.Shutdown(drainCtx) //nolint:errcheck
 			}()
 
 			proto := "ws"
@@ -133,6 +149,12 @@ func rootCmd() *cobra.Command {
 		"HMAC-SHA256-sign binary wire frames (increases frame size 13→45 bytes)")
 	cmd.Flags().BoolVar(&encryptPayloads, "encrypt-payloads", false,
 		"AES-256-GCM encrypt payload Data before storing")
+	cmd.Flags().Float64Var(&rateLimit, "rate-limit", 0,
+		"per-IP sustained request rate (req/s); 0 = unlimited")
+	cmd.Flags().IntVar(&rateBurst, "rate-burst", 0,
+		"per-IP burst allowance (default: rate-limit * 3)")
+	cmd.Flags().IntVar(&shutdownTimeout, "shutdown-timeout", 30,
+		"seconds to wait for in-flight connections to drain on shutdown")
 
 	return cmd
 }

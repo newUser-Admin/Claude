@@ -116,7 +116,10 @@ func (s *Server) saltExchange(ws *websocket.Conn) ([]byte, bool) {
 
 // wsAuth upgrades the connection, authenticates it, and calls handler with
 // the WebSocket and the per-session signing key (nil when signing is off).
+// It also increments the server's WaitGroup so Shutdown can drain cleanly.
 func (s *Server) wsAuth(w http.ResponseWriter, r *http.Request, handler func(*websocket.Conn, []byte)) {
+	s.wsWg.Add(1)
+	defer s.wsWg.Done()
 	if !s.cfg.ChallengeAuth {
 		// Legacy HTTP-level token check.
 		if tokenFromRequest(r) != s.cfg.Token {

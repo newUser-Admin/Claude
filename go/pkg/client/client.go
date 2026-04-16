@@ -247,6 +247,77 @@ func (c *Conn) Recv() (events.WireEvent, error) {
 	}
 }
 
+// ─── Retry dial ───────────────────────────────────────────────────────────────
+
+// RetryConfig controls the behaviour of DialWithRetry.
+type RetryConfig struct {
+	// MaxAttempts is the total number of dial attempts (including the first).
+	// 0 or 1 means one attempt only (no retries).
+	MaxAttempts int
+	// BaseDelay is the wait before the second attempt.
+	// Subsequent waits double up to MaxDelay.
+	BaseDelay time.Duration
+	// MaxDelay caps the exponential back-off.
+	MaxDelay time.Duration
+	// OnRetry is called before each retry attempt with the attempt number
+	// (1-based) and the error that triggered the retry.  May be nil.
+	OnRetry func(attempt int, err error)
+}
+
+// DefaultRetry is a sensible production retry config: up to 5 attempts with
+// exponential back-off starting at 1 s and capped at 30 s.
+var DefaultRetry = RetryConfig{
+	MaxAttempts: 5,
+	BaseDelay:   time.Second,
+	MaxDelay:    30 * time.Second,
+}
+
+// DialWithRetry calls Dial up to rc.MaxAttempts times with exponential
+// back-off between attempts.  It returns the first successful Conn or the last
+// error.  The context controls both the dial timeout on each attempt and the
+// overall cancellation.
+func DialWithRetry(ctx context.Context, cfg Config, path string, rc RetryConfig) (*Conn, error) {
+	if rc.MaxAttempts <= 1 {
+		return Dial(ctx, cfg, path)
+	}
+	if rc.BaseDelay <= 0 {
+		rc.BaseDelay = time.Second
+	}
+	if rc.MaxDelay <= 0 {
+		rc.MaxDelay = 30 * time.Second
+	}
+
+	delay := rc.BaseDelay
+	var lastErr error
+	for attempt := 1; attempt <= rc.MaxAttempts; attempt++ {
+		conn, err := Dial(ctx, cfg, path)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+
+		if attempt == rc.MaxAttempts {
+			break
+		}
+
+		if rc.OnRetry != nil {
+			rc.OnRetry(attempt, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+
+		delay *= 2
+		if delay > rc.MaxDelay {
+			delay = rc.MaxDelay
+		}
+	}
+	return nil, fmt.Errorf("dial failed after %d attempts: %w", rc.MaxAttempts, lastErr)
+}
+
 // RawConn returns the underlying gorilla WebSocket connection after all
 // authentication has been completed.  Use this for JSON-framed endpoints
 // (/ws/shell, /ws/sync) that do not use the binary WireEvent wire format.
