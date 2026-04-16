@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebSocket Shell</title>
+
+  <!-- xterm.js — full terminal emulation (ANSI, 256-color, resize) -->
+  <link  rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <!-- Fit addon — resizes the terminal to the container -->
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d0d0d;
+      color: #e0e0e0;
+      font-family: 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace;
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      overflow: hidden;
+    }
+
+    /* ── Toolbar ── */
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: #1a1a1a;
+      border-bottom: 1px solid #2a2a2a;
+      flex-shrink: 0;
+    }
+
+    #toolbar label { font-size: 12px; color: #888; white-space: nowrap; }
+
+    #toolbar input {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 4px;
+      color: #e0e0e0;
+      font-family: inherit;
+      font-size: 12px;
+      padding: 3px 7px;
+    }
+    #url-input  { flex: 1; min-width: 0; }
+    #tok-input  { width: 140px; }
+
+    #connect-btn {
+      padding: 4px 14px;
+      border: none;
+      border-radius: 4px;
+      background: #2563eb;
+      color: #fff;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    #connect-btn:hover { background: #1d4ed8; }
+    #connect-btn.connected { background: #dc2626; }
+    #connect-btn.connected:hover { background: #b91c1c; }
+
+    #status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #555;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+    #status-dot.connecting { background: #f59e0b; }
+    #status-dot.open       { background: #22c55e; }
+    #status-dot.closed     { background: #ef4444; }
+
+    #status-label { font-size: 11px; color: #666; min-width: 80px; }
+
+    /* ── Terminal container ── */
+    #terminal-wrap {
+      flex: 1;
+      padding: 8px;
+      overflow: hidden;
+    }
+
+    #terminal {
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+
+<div id="toolbar">
+  <div id="status-dot"></div>
+  <span id="status-label">Disconnected</span>
+
+  <label for="url-input">Server</label>
+  <input id="url-input"  type="text" value="ws://127.0.0.1:8080" spellcheck="false" />
+
+  <label for="tok-input">Token</label>
+  <input id="tok-input"  type="password" value="changeme" />
+
+  <button id="connect-btn">Connect</button>
+</div>
+
+<div id="terminal-wrap">
+  <div id="terminal"></div>
+</div>
+
+<script>
+'use strict';
+
+// ── Terminal setup ─────────────────────────────────────────────────────────
+const term = new Terminal({
+  cursorBlink:      true,
+  fontSize:         14,
+  fontFamily:       "'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace",
+  theme: {
+    background: '#0d0d0d',
+    foreground: '#e0e0e0',
+    cursor:     '#22c55e',
+    black:      '#1a1a1a', brightBlack:   '#555',
+    red:        '#ef4444', brightRed:     '#f87171',
+    green:      '#22c55e', brightGreen:   '#4ade80',
+    yellow:     '#f59e0b', brightYellow:  '#fbbf24',
+    blue:       '#3b82f6', brightBlue:    '#60a5fa',
+    magenta:    '#a855f7', brightMagenta: '#c084fc',
+    cyan:       '#06b6d4', brightCyan:    '#22d3ee',
+    white:      '#d1d5db', brightWhite:   '#f9fafb',
+  },
+  scrollback: 5000,
+  allowProposedApi: true,
+});
+
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+term.open(document.getElementById('terminal'));
+fitAddon.fit();
+
+term.writeln('\x1b[1;36mWebSocket Shell\x1b[0m — enter server URL and token, then click \x1b[1mConnect\x1b[0m.');
+term.writeln('');
+
+// ── DOM refs ───────────────────────────────────────────────────────────────
+const connectBtn  = document.getElementById('connect-btn');
+const urlInput    = document.getElementById('url-input');
+const tokInput    = document.getElementById('tok-input');
+const statusDot   = document.getElementById('status-dot');
+const statusLabel = document.getElementById('status-label');
+
+// ── State ──────────────────────────────────────────────────────────────────
+let ws       = null;
+let attached = false; // whether xterm key handler is wired
+
+// ── Status helpers ─────────────────────────────────────────────────────────
+function setStatus(state, label) {
+  statusDot.className   = state;
+  statusLabel.textContent = label;
+}
+
+// ── Connection ─────────────────────────────────────────────────────────────
+function connect() {
+  const baseUrl = urlInput.value.trim();
+  const token   = tokInput.value.trim();
+
+  if (!baseUrl) { term.writeln('\r\n\x1b[33m[client] Enter a server URL first.\x1b[0m'); return; }
+
+  const url = `${baseUrl}?token=${encodeURIComponent(token)}`;
+
+  setStatus('connecting', 'Connecting…');
+  connectBtn.textContent = 'Connecting…';
+  connectBtn.disabled    = true;
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    setStatus('open', 'Connected');
+    connectBtn.textContent = 'Disconnect';
+    connectBtn.classList.add('connected');
+    connectBtn.disabled = false;
+
+    term.writeln(`\r\n\x1b[32m[client] Connected to ${baseUrl}\x1b[0m\r\n`);
+
+    // Wire terminal input → WebSocket
+    if (!attached) {
+      term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'input', data }));
+        }
+      });
+      attached = true;
+    }
+
+    // Send initial terminal size
+    sendResize();
+  };
+
+  ws.onmessage = ({ data }) => {
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+
+    switch (msg.type) {
+      case 'output':
+        term.write(msg.data);
+        break;
+
+      case 'exit':
+        term.writeln(`\r\n\x1b[33m[client] Shell exited (code ${msg.code}).\x1b[0m`);
+        disconnect();
+        break;
+
+      case 'error':
+        term.writeln(`\r\n\x1b[31m[client] Server error: ${msg.message}\x1b[0m`);
+        break;
+    }
+  };
+
+  ws.onclose = (evt) => {
+    setStatus('closed', 'Disconnected');
+    connectBtn.textContent = 'Connect';
+    connectBtn.classList.remove('connected');
+    connectBtn.disabled = false;
+
+    if (evt.code === 4001) {
+      term.writeln('\r\n\x1b[31m[client] Authentication failed — check your token.\x1b[0m');
+    } else if (evt.code !== 1000 && evt.code !== 1001) {
+      term.writeln(`\r\n\x1b[33m[client] Connection closed (code ${evt.code}).\x1b[0m`);
+    }
+    ws = null;
+  };
+
+  ws.onerror = () => {
+    term.writeln('\r\n\x1b[31m[client] WebSocket error — is the server running?\x1b[0m');
+  };
+}
+
+function disconnect() {
+  if (ws) {
+    ws.close(1000, 'User disconnected');
+    ws = null;
+  }
+}
+
+// ── Resize handling ────────────────────────────────────────────────────────
+function sendResize() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  }
+}
+
+const resizeObserver = new ResizeObserver(() => {
+  fitAddon.fit();
+  sendResize();
+});
+resizeObserver.observe(document.getElementById('terminal-wrap'));
+
+term.onResize(sendResize);
+
+// ── Toolbar button ─────────────────────────────────────────────────────────
+connectBtn.addEventListener('click', () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    disconnect();
+  } else {
+    connect();
+  }
+});
+
+// Allow pressing Enter in the URL / token fields to connect
+[urlInput, tokInput].forEach((el) => {
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') connectBtn.click();
+  });
+});
+
+// ── Initial fit ────────────────────────────────────────────────────────────
+window.addEventListener('load', () => fitAddon.fit());
+</script>
+</body>
+</html>
