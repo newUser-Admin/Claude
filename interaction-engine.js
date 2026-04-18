@@ -483,9 +483,10 @@ export class NetworkSync {
    * @param {function(object): void}     [opts.onUpdate]    Called when remote state changes
    * @param {number}                     [opts.maxUnacked=64] Max unacked outbound deltas to keep
    */
-  constructor({ onSend = null, onUpdate = null, maxUnacked = 64 } = {}) {
+  constructor({ onSend = null, onUpdate = null, onError = null, maxUnacked = 64 } = {}) {
     this._onSend     = onSend;
     this._onUpdate   = onUpdate;
+    this._onError    = onError;
     this._maxUnacked = maxUnacked;
 
     this._localState  = Object.create(null);
@@ -541,7 +542,8 @@ export class NetworkSync {
     const { delta, deletions } = this._computeDelta();
     if (Object.keys(delta).length === 0 && deletions.length === 0) return null;
 
-    const seq = ++this._localSeq;
+    this._localSeq = (this._localSeq + 1) >>> 0; // wrap at uint32 max
+    const seq = this._localSeq;
     const frame = {
       type: 'update',
       seq,
@@ -574,10 +576,18 @@ export class NetworkSync {
     try {
       frame = BinarySerializer.decode(rawFrame);
     } catch (err) {
-      console.warn('[NetworkSync] Failed to decode frame:', err);
+      if (this._onError) this._onError(err);
       return;
     }
+    this._receiveFrame(frame);
+  }
 
+  /**
+   * Process an already-decoded frame object (skips BinarySerializer decode).
+   * Used internally when the frame was pre-decoded during jitter-buffer ingestion.
+   * @param {object} frame
+   */
+  _receiveFrame(frame) {
     if (frame.type === 'update') {
       this._handleUpdate(frame);
     } else if (frame.type === 'ack') {
@@ -618,13 +628,15 @@ export class NetworkSync {
     if (frame.deletions) frame.deletions.forEach(k => delete this._remoteState[k]);
 
     // Send ACK
-    const ack = BinarySerializer.encode({
-      type: 'ack',
-      seq:  this._localSeq,
-      ack:  frame.seq,
-      ts:   Date.now(),
-    });
-    if (this._onSend) this._onSend(ack);
+    if (this._onSend) {
+      const ack = BinarySerializer.encode({
+        type: 'ack',
+        seq:  this._localSeq,
+        ack:  frame.seq,
+        ts:   Date.now(),
+      });
+      this._onSend(ack);
+    }
 
     if (this._onUpdate) this._onUpdate(this.getState());
   }
@@ -674,6 +686,10 @@ export class MemoryPersistence {
    * @param {string}           [opts.namespace='ie']    Prefix for storage keys
    */
   constructor({ backend = 'memory', namespace = 'ie' } = {}) {
+    if (backend === 'local' && typeof localStorage === 'undefined') {
+      console.warn('[MemoryPersistence] localStorage unavailable; falling back to memory backend');
+      backend = 'memory';
+    }
     this._backend   = backend;
     this._namespace = namespace;
     this._store     = new Map(); // used only for 'memory' backend
@@ -783,16 +799,19 @@ export class InteractionEngine {
    * @param {'memory'|'local'} [opts.persistence='memory']  Persistence backend
    * @param {string}           [opts.storageKey='engine']   Key used for state snapshots
    * @param {number}           [opts.tickRate=50]           Jitter-buffer poll interval (ms)
+   * @param {boolean}          [opts.autoFlush=false]       Flush delta to wire on every setState()
    * @param {object}           [opts.jitter={}]             Options forwarded to JitterBuffer
    */
   constructor({
     persistence = 'memory',
     storageKey  = 'engine',
     tickRate    = 50,
+    autoFlush   = false,
     jitter      = {},
   } = {}) {
     this._storageKey = storageKey;
     this._tickRate   = tickRate;
+    this._autoFlush  = autoFlush;
     this._tickHandle = null;
     this._sendFn     = null;
 
@@ -806,6 +825,7 @@ export class InteractionEngine {
     this._sync = new NetworkSync({
       onSend:   (frame) => { if (this._sendFn) this._sendFn(frame); },
       onUpdate: (state) => this._emit('update', state),
+      onError:  (err)   => this._emit('error', err),
     });
 
     // Event bus: Map<eventName, Set<listener>>
@@ -850,6 +870,7 @@ export class InteractionEngine {
     } else {
       this._sync.set(keyOrObj);
     }
+    if (this._autoFlush) this._sync.flush();
   }
 
   /**
@@ -882,20 +903,21 @@ export class InteractionEngine {
    */
   receive(rawData, seq, ts) {
     const u8 = rawData instanceof ArrayBuffer ? new Uint8Array(rawData) : rawData;
+    let decoded = null;
 
-    // Auto-detect seq and ts by peeking into the frame envelope
+    // Peek seq/ts from envelope; cache the decoded object to avoid re-decoding in _tick()
     if (seq === undefined || ts === undefined) {
       try {
-        const peeked = BinarySerializer.decode(u8);
-        seq = seq ?? (peeked.seq ?? (this._jitterBuffer._nextSeq ?? 0));
-        ts  = ts  ?? (peeked.ts  ?? Date.now());
+        decoded = BinarySerializer.decode(u8);
+        seq = seq ?? (decoded.seq ?? (this._jitterBuffer._nextSeq ?? 0));
+        ts  = ts  ?? (decoded.ts  ?? Date.now());
       } catch {
         seq = seq ?? (this._jitterBuffer._nextSeq ?? 0);
         ts  = ts  ?? Date.now();
       }
     }
 
-    this._jitterBuffer.push({ seq, ts, data: u8 });
+    this._jitterBuffer.push({ seq, ts, data: u8, decoded });
   }
 
   // ── Persistence ───────────────────────────────────────────────────────────
@@ -937,6 +959,7 @@ export class InteractionEngine {
    *   'disconnect' — engine disconnected from transport
    *   'update'     — remote state change applied (payload: merged state object)
    *   'restore'    — snapshot restored (payload: restored state object)
+   *   'error'      — inbound frame failed to decode (payload: Error)
    *
    * @param   {string}   event
    * @param   {function} fn
@@ -957,6 +980,17 @@ export class InteractionEngine {
   off(event, fn) {
     this._listeners.get(event)?.delete(fn);
     return this;
+  }
+
+  /**
+   * Subscribe to an event for exactly one invocation, then auto-unsubscribe.
+   * @param   {string}   event
+   * @param   {function} fn
+   * @returns {this}
+   */
+  once(event, fn) {
+    const wrapper = (payload) => { this.off(event, wrapper); fn(payload); };
+    return this.on(event, wrapper);
   }
 
   // ── Diagnostics ───────────────────────────────────────────────────────────
@@ -995,10 +1029,14 @@ export class InteractionEngine {
   }
 
   _tick() {
-    // Process all jitter-buffer packets that are ready for playout
-    const ready = this._jitterBuffer.drainReady();
-    for (const pkt of ready) {
-      this._sync.receive(pkt.data);
+    // Drain all packets whose adaptive playout deadline has arrived
+    let pkt;
+    while ((pkt = this._jitterBuffer.poll()) !== null) {
+      if (pkt.decoded != null) {
+        this._sync._receiveFrame(pkt.decoded); // skip re-decode
+      } else {
+        this._sync.receive(pkt.data);
+      }
     }
   }
 
