@@ -1,0 +1,50 @@
+# interaction-engine.service
+#
+# systemd unit for the Interaction Engine WebSocket server.
+# Installed by autostart/install-linux.sh — do not edit the copy in
+# /etc/systemd/system directly; edit here and re-run the installer.
+#
+# Manual commands after installation:
+#   sudo systemctl status   interaction-engine
+#   sudo journalctl -u      interaction-engine -f
+#   sudo systemctl restart  interaction-engine
+#   sudo systemctl stop     interaction-engine
+#   sudo systemctl disable  interaction-engine   # remove from boot
+
+[Unit]
+Description=Interaction Engine — high-fidelity binary sync server
+Documentation=https://github.com/newUser-Admin/Claude
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__INSTALL_DIR__
+
+# 'env node' lets nvm / volta / asdf-managed Nodes be found via PATH.
+ExecStart=/usr/bin/env node __INSTALL_DIR__/engine-start.js
+
+# Restart on any non-zero exit; wait 5 s between attempts.
+Restart=on-failure
+RestartSec=5
+
+# Route all stdout/stderr to the system journal (journalctl -u interaction-engine).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=interaction-engine
+
+Environment=NODE_ENV=production
+Environment=PORT=8079
+Environment=HOST=127.0.0.1
+Environment=LOG_LEVEL=info
+
+# Basic sandboxing — tighten further if the process has no reason to
+# write outside its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=__INSTALL_DIR__
+
+[Install]
+WantedBy=multi-user.target

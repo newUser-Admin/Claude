@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.interaction-engine.plist
+  macOS LaunchAgent for the Interaction Engine WebSocket server.
+  Installed by autostart/install-macos.sh — do not edit the copy in
+  ~/Library/LaunchAgents directly; edit here and re-run the installer.
+
+  Manual commands after installation:
+    launchctl list | grep interaction-engine
+    launchctl stop  com.interaction-engine
+    launchctl start com.interaction-engine
+    launchctl unload ~/Library/LaunchAgents/com.interaction-engine.plist
+-->
+<plist version="1.0">
+<dict>
+
+    <!-- Unique reverse-DNS label for this agent -->
+    <key>Label</key>
+    <string>com.interaction-engine</string>
+
+    <!-- Absolute path to node + the entry-point script -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NODE_BIN__</string>
+        <string>__INSTALL_DIR__/engine-start.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__INSTALL_DIR__</string>
+
+    <!-- Environment variables passed to the process -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NODE_ENV</key>  <string>production</string>
+        <key>PORT</key>      <string>8079</string>
+        <key>HOST</key>      <string>127.0.0.1</string>
+        <key>LOG_LEVEL</key> <string>info</string>
+    </dict>
+
+    <!-- Start when the agent is loaded (i.e. at login) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- launchd restarts the process if it exits for any reason -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Minimum seconds between automatic restarts -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- Log files; the directory is created by install-macos.sh -->
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/engine.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/engine-error.log</string>
+
+    <!-- Run as a low-priority background task -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+</dict>
+</plist>
